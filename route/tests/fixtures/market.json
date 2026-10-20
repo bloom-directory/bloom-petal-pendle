@@ -1,0 +1,54 @@
+{
+  "chainId": 42161,
+  "address": "0xf86119a39f8654f38acbbd5488bd83f3f51983c8",
+  "expiry": "2027-02-25T00:00:00.000Z",
+  "pt": {
+    "address": "0xe9d07c2a3588b9a25edd55664be44ecfe5f92fce",
+    "symbol": "PT-sUSDai-25FEB2027",
+    "decimals": 18
+  },
+  "yt": {
+    "address": "0x9adc5ff64705ccedf6ba61cdac124a720c0ff902",
+    "symbol": "YT-sUSDai-25FEB2027",
+    "decimals": 18
+  },
+  "sy": {
+    "address": "0x30ccf4bbee313fcd19f3e295b3ba2920a24e2f62",
+    "symbol": "SY-sUSDai",
+    "decimals": 18
+  },
+  "accountingAsset": {
+    "address": "0x0a1a1a107e45b7ced86833863f482bc5f4ed82ef",
+    "symbol": "USDai",
+    "decimals": 18
+  },
+  "underlyingAsset": {
+    "address": "0x0b2b2b2076d95dda7817e785989fe353fe955ef9",
+    "symbol": "sUSDai",
+    "decimals": 18
+  },
+  "inputTokens": [
+    {
+      "address": "0x0a1a1a107e45b7ced86833863f482bc5f4ed82ef",
+      "symbol": "USDai",
+      "decimals": 18
+    },
+    {
+      "address": "0x0b2b2b2076d95dda7817e785989fe353fe955ef9",
+      "symbol": "sUSDai",
+      "decimals": 18
+    },
+    {
+      "address": "0x46850ad61c2b7d64d08c9c754f45254596696984",
+      "symbol": "PYUSD",
+      "decimals": 6
+    }
+  ],
+  "outputTokens": [
+    {
+      "address": "0x0b2b2b2076d95dda7817e785989fe353fe955ef9",
+      "symbol": "sUSDai",
+      "decimals": 18
+    }
+  ]
+}

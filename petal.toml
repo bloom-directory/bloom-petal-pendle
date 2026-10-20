@@ -1,0 +1,22 @@
+schema = "bloom.petal.package.v1"
+name = "pendle"
+
+[consent]
+summary = "Read Pendle markets and the selected account's portfolio; prepare bounded PT buys, sells and maturity redemptions on Arbitrum. Token approvals and execution use Bloom's owner-approved transaction outbox. No agent key or standing trading authority."
+
+[caps]
+allowed = ["bloom:http", "bloom:store", "bloom:vfs.read", "bloom:chain", "bloom:tx.outbox"]
+
+[store]
+namespaces = ["state"]
+
+[[net.allow]]
+host = "api-v2.pendle.finance"
+methods = ["get"]
+paths = ["/core/v1/42161/markets/*"]
+
+[[net.allow]]
+host = "api-v2.pendle.finance"
+methods = ["post"]
+paths = ["/core/mcp", "/core/v3/sdk/42161/convert"]
+

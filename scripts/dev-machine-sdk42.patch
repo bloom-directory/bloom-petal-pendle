@@ -1,0 +1,72 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 91abf5ed..60639ffd 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2568,7 +2568,7 @@ dependencies = [
+ [[package]]
+ name = "bloom-petal-contract"
+ version = "0.1.0"
+-source = "git+https://github.com/bloom-directory/petal?rev=73c5b06a77599368fbc79fb7947a629b5b4c630e#73c5b06a77599368fbc79fb7947a629b5b4c630e"
++source = "git+https://github.com/bloom-directory/petal?rev=8501029631b4305a18084185a9bb6fb0daed2147#8501029631b4305a18084185a9bb6fb0daed2147"
+ dependencies = [
+  "hex",
+  "sha2 0.11.0",
+diff --git a/Cargo.toml b/Cargo.toml
+index 6d4c0591..1807c773 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -131,7 +131,7 @@ bloom-ens      = { path = "crates/bloom-ens" }
+ bloom-prices   = { path = "crates/bloom-prices" }
+ bloom-revert   = { path = "crates/bloom-revert" }
+ bloom-petals   = { path = "crates/bloom-petals" }
+-bloom-petal-contract = { git = "https://github.com/bloom-directory/petal", rev = "73c5b06a77599368fbc79fb7947a629b5b4c630e" }
++bloom-petal-contract = { git = "https://github.com/bloom-directory/petal", rev = "8501029631b4305a18084185a9bb6fb0daed2147" }
+ bloom-daemon   = { path = "crates/bloom-daemon" }
+ bloom-update   = { path = "crates/bloom-update" }
+ bloom-broker-api = { git = "https://github.com/bloom-directory/bloom-broker.git", rev = "9f394aebbc9c04a6031de31a12385e5485f8ca9b" }
+diff --git a/crates/bloom/src/triad_enrollment.rs b/crates/bloom/src/triad_enrollment.rs
+index 2dd1c754..180609be 100644
+--- a/crates/bloom/src/triad_enrollment.rs
++++ b/crates/bloom/src/triad_enrollment.rs
+@@ -476,9 +476,9 @@ fn enroll_developer_petal_provenance(
+     let mut additions = Vec::new();
+     for route in &package.route_index.routes {
+         let operation_classes = developer_route_operation_classes(route)?;
+-        if operation_classes.is_empty() {
+-            continue;
+-        }
++        // Non-signing Petals still need authenticated lineage for their
++        // account-isolated stores and outbox provenance. Empty operation
++        // classes grant no signing authority (developer harness only).
+         additions.push(ProvenanceRecord {
+             subject: ProvenanceSubject::Petal {
+                 package_hash: package_hash.clone(),
+diff --git a/scripts/triad-dev-launch.sh b/scripts/triad-dev-launch.sh
+index 86f44efd..30854af2 100755
+--- a/scripts/triad-dev-launch.sh
++++ b/scripts/triad-dev-launch.sh
+@@ -382,6 +382,14 @@ if [ -n "$hyperliquid_package" ]; then
+   "$bloom_bin" init triad-enroll-developer-petal-provenance \
+     "$config_dir" "$hyperliquid_package"
+ fi
++extra_package="${BLOOM_TRIAD_DEV_PETAL_PACKAGE:-}"
++if [ -n "$extra_package" ]; then
++  [ -d "$extra_package" ] || die "developer Petal package is missing: $extra_package"
++  if [ "$build_integration_petals" -eq 1 ]; then
++    (cd "$extra_package" && scripts/build.sh)
++  fi
++  "$bloom_bin" init triad-enroll-developer-petal-provenance "$config_dir" "$extra_package"
++fi
+ mkdir -p "${developer_root}/state/broker" "${developer_root}/state/signer"
+ chmod 0700 "${developer_root}/state" \
+   "${developer_root}/state/broker" "${developer_root}/state/signer"
+@@ -855,7 +863,8 @@ fi
+ 
+ for integration_petal in \
+   "${BLOOM_TRIAD_DEV_POLYMARKET_PACKAGE:-}" \
+-  "${BLOOM_TRIAD_DEV_HYPERLIQUID_PACKAGE:-}"
++  "${BLOOM_TRIAD_DEV_HYPERLIQUID_PACKAGE:-}" \
++  "${BLOOM_TRIAD_DEV_PETAL_PACKAGE:-}"
+ do
+   [ -n "$integration_petal" ] || continue
+   [ -d "$integration_petal" ] || die "integration Petal package is missing: $integration_petal"

@@ -1,0 +1,1 @@
+petal::route_file!(spec: petal::static_dir_spec(), list: vec![petal::file("markets.json"), petal::dir("markets"), petal::dir("accounts"), petal::dir("buy-pt"), petal::dir("sell-pt"), petal::dir("redeem-pt")]);
