@@ -13,10 +13,10 @@ namespaces = ["state"]
 [[net.allow]]
 host = "api-v2.pendle.finance"
 methods = ["get"]
-paths = ["/core/v1/42161/markets/*"]
+paths = ["/core/v1/42161/markets/*", "/core/v2/markets/all", "/core/v1/dashboard/positions/database/*"]
 
 [[net.allow]]
 host = "api-v2.pendle.finance"
 methods = ["post"]
-paths = ["/core/mcp", "/core/v3/sdk/42161/convert"]
+paths = ["/core/v3/sdk/42161/convert"]
 

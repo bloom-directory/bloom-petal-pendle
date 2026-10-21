@@ -42,6 +42,8 @@ struct Fake {
     factory: bool,
     allowance: U256,
     http_calls: usize,
+    http_response: Option<HttpResponse>,
+    requests: Vec<HttpRequest>,
     staged: Vec<EvmTransaction>,
     lose_stage: bool,
     approved: bool,
@@ -57,6 +59,8 @@ impl Default for Fake {
             factory: true,
             allowance: U256::ZERO,
             http_calls: 0,
+            http_response: None,
+            requests: vec![],
             staged: vec![],
             lose_stage: false,
             approved: false,
@@ -70,6 +74,10 @@ impl Host for Fake {
     }
     fn http(&mut self, req: HttpRequest, _max: usize) -> Result<HttpResponse> {
         self.http_calls += 1;
+        self.requests.push(req.clone());
+        if let Some(response) = self.http_response.take() {
+            return Ok(response);
+        }
         let payload = if req.method == "GET" {
             serde_json::to_value(market()).unwrap()
         } else {
@@ -447,4 +455,72 @@ fn every_pinned_deployment_is_a_canonical_address() {
         "market is not authenticated by a supported Pendle factory"
     );
     assert_eq!(address(ROUTER).unwrap().to_string().len(), 42);
+}
+
+#[test]
+fn rest_reads_request_json_without_a_protocol_envelope() {
+    let mut host = Fake {
+        http_response: Some(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: br#"{"total":0,"limit":50,"skip":0,"results":[]}"#.to_vec(),
+        }),
+        ..Fake::default()
+    };
+    let url = format!("{API}/v2/markets/all?chainId=42161&isActive=true&skip=0&limit=50");
+    let result = api::http_json(&mut host, "GET", url.clone(), None).unwrap();
+    assert_eq!(result["total"], 0);
+    assert_eq!(result["results"], json!([]));
+    let request = &host.requests[0];
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.url, url);
+    assert!(request.body.is_empty());
+    assert!(
+        request
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Accept" && v == "application/json")
+    );
+    assert!(host.staged.is_empty());
+}
+
+#[test]
+fn rest_reads_reject_non_json_without_echoing_upstream_body() {
+    let mut host = Fake {
+        http_response: Some(HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: b"data: private upstream detail".to_vec(),
+        }),
+        ..Fake::default()
+    };
+    assert_eq!(
+        api::http_json(&mut host, "GET", format!("{API}/v2/markets/all"), None).unwrap_err(),
+        "invalid Pendle JSON response"
+    );
+}
+
+#[test]
+fn rest_reads_preserve_http_failure_and_bound_response_size() {
+    let mut host = Fake {
+        http_response: Some(HttpResponse {
+            status: 429,
+            headers: vec![],
+            body: b"private upstream detail".to_vec(),
+        }),
+        ..Fake::default()
+    };
+    let error =
+        api::http_json(&mut host, "GET", format!("{API}/v2/markets/all"), None).unwrap_err();
+    assert!(error.contains("HTTP 429"));
+    assert!(!error.contains("private upstream detail"));
+    host.http_response = Some(HttpResponse {
+        status: 200,
+        headers: vec![],
+        body: vec![b' '; 512 * 1024 + 1],
+    });
+    assert_eq!(
+        api::http_json(&mut host, "GET", format!("{API}/v2/markets/all"), None).unwrap_err(),
+        "Pendle response is too large"
+    );
 }

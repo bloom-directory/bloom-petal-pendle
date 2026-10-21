@@ -3,7 +3,7 @@
 An account-scoped Pendle V2 Petal for Bloom. This first developer release
 supports market discovery, portfolio reads, PT buys, PT sells and post-maturity
 PT redemption on Arbitrum. It uses Pendle's V3 Convert API for unsigned
-transactions and a bounded read-only MCP client for discovery/portfolios.
+transactions and the public HTTP API for discovery and portfolios.
 
 SDK and builder: the reviewed head of Petal PR [#42](https://github.com/bloom-directory/petal/pull/42),
 commit `8501029631b4305a18084185a9bb6fb0daed2147`. This work does not merge the PR or follow later changes to its branch.
@@ -15,9 +15,9 @@ All paths below are relative to `/petals/pendle/`:
 | Path | Behavior |
 | --- | --- |
 | `status.json` | Supported features and exact SDK revision |
-| `arbitrum/markets.json` | First 50 active markets from Pendle |
+| `arbitrum/markets.json` | First page of up to 50 active Arbitrum markets (`total`, `skip`, `limit`, `results`) |
 | `arbitrum/markets/<market>/info.json` | Market identities, maturity, accounting/underlying assets |
-| `arbitrum/accounts/<wallet>/<index>/portfolio.json` | Pendle's cross-chain portfolio for the selected account address |
+| `arbitrum/accounts/<wallet>/<index>/portfolio.json` | Pendle's indexed cross-chain positions for the selected account address |
 | `arbitrum/<operation>/<wallet>/<index>/<id>/draft.json` | Write a new immutable quote; read the input schema |
 | `arbitrum/<operation>/<wallet>/<index>/<id>/plan.md` | Review inputs, receiver, minima, expiry and transaction steps |
 | `arbitrum/<operation>/<wallet>/<index>/<id>/confirm.json` | Write exactly `confirm` to advance one outbox step |
@@ -45,6 +45,16 @@ SY is supported directly. Other ERC-20s must be native inputs/outputs of that
 market's SY wrapper. Slippage is 1–100 bps; price impact ceiling is 0–300 bps.
 PT maturity/redemption is expressed in the accounting asset, which can differ
 from the underlying asset. API APYs and expected amounts remain estimates.
+
+## HTTP data sources
+
+Reads use `GET /core/v2/markets/all` with Arbitrum/active filters and bounded
+pagination, `GET /core/v1/42161/markets/<market>`, and
+`GET /core/v1/dashboard/positions/database/<account-address>`. Responses use
+Pendle's REST JSON shape. Portfolio data is indexed and may lag chain state;
+claimable rewards can be cached for up to 24 hours. It is not execution proof.
+
+API reference: https://docs.pendle.finance/pendle-v2-dev/Backend/ApiOverview
 
 ## Transaction lifecycle
 
@@ -87,13 +97,17 @@ Both the generated route workspace and route crate pin the same SDK SHA.
 `route/Cargo.lock` is committed. All 35 route components must build and pass
 capability checks; host-crate tests alone do not compile route controllers.
 
-`scripts/dev-machine-sdk42.patch` records the isolated Machine changes used
-for local integration: the #42 contract pin, lineage-only developer enrollment
-(no signing operation classes), and a generic local-Petal launcher hook.
-It applies to Bloom `caefe751baae789a82a0451ff3ee56971ddfe769`.
-Broker is `d1ab181ec376af4fe5d5b8ea321cc285c9c75413`; Signer is
-`bc88ad690757165ebf1978410ea5c7ec652215d3`. These are local developer changes,
-not merged or production release pins.
+This repository contains no Bloom source patches. Installation does not grant
+signing authority or add installer provenance. A developer triad must enroll
+the exact package through Bloom's own supported tooling. Current release
+restrictions on custom-Petal provenance still apply; this package does not
+bypass them or establish compatibility with an ordinary release install.
+
+The earlier local-fork acceptance run used a modified developer Machine and
+predates the direct-HTTP read implementation. It is historical evidence for
+the transaction workflow, not acceptance evidence for this revision on stock
+Bloom. The acceptance script remains available to rerun against an appropriately
+enrolled developer environment.
 
 The acceptance script uses an isolated local Arbitrum fork, disposable
 Signer-created custody and software owner ceremonies. Public Arbitrum is read
