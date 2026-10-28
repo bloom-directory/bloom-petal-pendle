@@ -13,7 +13,7 @@ pub const CHAIN: &str = "arbitrum";
 pub const CHAIN_ID: u64 = 42161;
 pub const ROUTER: &str = "0x888888888889758f76e7103c6cbf23abbf58f946";
 pub const API: &str = "https://api-v2.pendle.finance/core";
-pub const SDK_REV: &str = "8501029631b4305a18084185a9bb6fb0daed2147";
+pub const SDK_REV: &str = "4fefa736df67fa1ee51aeaa0c749d2f11414257d";
 
 pub fn chain(value: &str) -> Result<()> {
     if value == CHAIN {

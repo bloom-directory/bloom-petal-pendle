@@ -1,8 +1,11 @@
 # pendle operating contract
 
-Pendle V2 on Arbitrum. SDK/tooling are pinned to the original reviewed head of Petal PR #42 at
-`8501029631b4305a18084185a9bb6fb0daed2147`. Do not merge that PR as part of
-developing this package.
+Pendle V2 on Arbitrum. SDK and tooling are pinned to Petal commit
+`4fefa736df67fa1ee51aeaa0c749d2f11414257d`, where PR #42 merged into `master`.
+Move every copy of the pin together: `route/Cargo.toml` (then
+`cargo update --manifest-path route/Cargo.toml -p bloom-petal-sdk`),
+`petal-build.toml`, `scripts/build.sh`, `SDK_REV` in `route/src/lib.rs`, the
+report in `scripts/triad-acceptance.py`, and the links in this file and the README.
 
 All account routes use adjacent `[wallet]/[index]` captures and
 `petal::wallet_account(ctx)`. There is no account-zero fallback or body-supplied
@@ -25,6 +28,6 @@ Never broadcast on mainnet or use real funds without explicit authorization.
 ## Development skill
 
 Petals are authored against the `bloom-petal-development` skill:
-https://github.com/bloom-directory/petal/tree/8501029631b4305a18084185a9bb6fb0daed2147/skills/bloom-petal-development
+https://github.com/bloom-directory/petal/tree/4fefa736df67fa1ee51aeaa0c749d2f11414257d/skills/bloom-petal-development
 Load it into your agent before extending this Petal.
 
