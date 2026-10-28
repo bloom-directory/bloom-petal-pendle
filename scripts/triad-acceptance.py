@@ -49,7 +49,7 @@ def main():
     wallet = "pendle-" + str(time.time_ns())[-12:]
     auth_seed = "pendle-disposable-software-owner-" + wallet
     work = args.triad_env.resolve().parent.parent
-    report = {"sdk_revision": "4fefa736df67fa1ee51aeaa0c749d2f11414257d", "wallet": wallet, "account": 1, "checks": [], "transactions": []}
+    report = {"sdk_revision": "7dd2722db5de305dd63ca4ed03591f3ab82fa40b", "wallet": wallet, "account": 1, "checks": [], "transactions": []}
 
     def command(argv, check=True):
         p = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=90)
