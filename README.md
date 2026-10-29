@@ -5,8 +5,10 @@ supports market discovery, portfolio reads, PT buys, PT sells and post-maturity
 PT redemption on Arbitrum. It uses Pendle's V3 Convert API for unsigned
 transactions and the public HTTP API for discovery and portfolios.
 
-SDK and builder: the reviewed head of Petal PR [#42](https://github.com/bloom-directory/petal/pull/42),
-commit `8501029631b4305a18084185a9bb6fb0daed2147`. This work does not merge the PR or follow later changes to its branch.
+SDK and builder: Petal commit `7dd2722db5de305dd63ca4ed03591f3ab82fa40b`, where
+PR [#45](https://github.com/bloom-directory/petal/pull/45) merged into `master`.
+The `bloom-petal-development` skill from that commit is in
+`.agents/skills/bloom-petal-development/SKILL.md`.
 
 ## Routes
 

@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-petal = { package = "bloom-petal-sdk", git = "https://github.com/bloom-directory/petal", rev = "8501029631b4305a18084185a9bb6fb0daed2147" }
+petal = { package = "bloom-petal-sdk", git = "https://github.com/bloom-directory/petal", rev = "7dd2722db5de305dd63ca4ed03591f3ab82fa40b" }
 alloy = { version = "=2.0.5", default-features = false, features = ["sol-types", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

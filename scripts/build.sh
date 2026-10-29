@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PETAL_REV="8501029631b4305a18084185a9bb6fb0daed2147"
+PETAL_REV="7dd2722db5de305dd63ca4ed03591f3ab82fa40b"
 if [[ -n "${PETAL_BIN:-}" ]]; then
   "$PETAL_BIN" build --root "$ROOT"
 else
