@@ -1,5 +1,5 @@
 use crate::{
-    DraftInput, Operation, ROUTER, Result, address, amount, api, evm,
+    Chain, DraftInput, Operation, ROUTER, Result, address, amount, api, evm,
     host::{Host, account_address},
     operation_id,
 };
@@ -16,9 +16,12 @@ pub struct Step {
     pub outbox_id: Option<String>,
     pub tx_hash: Option<String>,
 }
+pub const SCHEMA: &str = "bloom.pendle.operation.v2";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Draft {
     pub schema: String,
+    pub chain: Chain,
     pub id: String,
     pub wallet: String,
     pub account: u32,
@@ -36,27 +39,41 @@ pub struct Draft {
     pub state: String,
     pub steps: Vec<Step>,
 }
-fn key(op: Operation, id: &str) -> Result<String> {
+/// Store prefix of one chain's operations of one kind, in the account store.
+pub fn prefix(chain: Chain, op: Operation) -> String {
+    format!("operations/{}/{}/", chain.name(), op.name())
+}
+fn key(chain: Chain, op: Operation, id: &str) -> Result<String> {
+    Ok(format!("{}{}.json", prefix(chain, op), operation_id(id)?))
+}
+pub fn lock_key(chain: Chain, op: Operation, id: &str) -> Result<String> {
     Ok(format!(
-        "operations/{}/{}.json",
+        "locks/{}/{}/{}",
+        chain.name(),
         op.name(),
         operation_id(id)?
     ))
 }
 fn save<H: Host>(host: &mut H, draft: &Draft) -> Result<()> {
     host.put(
-        &key(draft.operation, &draft.id)?,
+        &key(draft.chain, draft.operation, &draft.id)?,
         &serde_json::to_vec(draft).map_err(|_| "encode operation")?,
     )
 }
 pub fn load<H: Host>(
     host: &mut H,
+    chain: Chain,
     account: &WalletAccount,
     op: Operation,
     id: &str,
 ) -> Result<Draft> {
-    let data = host.get(&key(op, id)?)?.ok_or("operation not found")?;
+    let data = host
+        .get(&key(chain, op, id)?)?
+        .ok_or("operation not found")?;
     let draft: Draft = serde_json::from_slice(&data).map_err(|_| "invalid persisted operation")?;
+    if draft.schema != SCHEMA || draft.chain != chain || draft.market.chain_id != chain.id() {
+        return Err("persisted operation does not belong to the selected chain".into());
+    }
     if draft.wallet != account.wallet()
         || draft.account != account.number()
         || draft.operation != op
@@ -70,15 +87,16 @@ pub fn load<H: Host>(
 
 pub fn create<H: Host>(
     host: &mut H,
+    chain: Chain,
     account: &WalletAccount,
     op: Operation,
     id: &str,
     body: &[u8],
 ) -> Result<()> {
-    let key = key(op, id)?;
+    let key = key(chain, op, id)?;
     let request = DraftInput::parse(body)?;
     if host.get(&key)?.is_some() {
-        let old = load(host, account, op, id)?;
+        let old = load(host, chain, account, op, id)?;
         return if old.request == request {
             Ok(())
         } else {
@@ -86,20 +104,23 @@ pub fn create<H: Host>(
         };
     }
     let owner = account_address(host, account)?;
-    let market = api::market(host, &request.market)?;
-    evm::verify_market(host, &market, op, address(&request.token)?)?;
+    let market = api::market(host, chain, &request.market)?;
+    evm::verify_market(host, chain, &market, op, address(&request.token)?)?;
     let (input_token, output_token) = if op == Operation::BuyPt {
         (request.token.clone(), market.pt.address.clone())
     } else {
         (market.pt.address.clone(), request.token.clone())
     };
+    // Pendle fills limit orders inside swaps unless told not to, and the
+    // calldata check refuses any embedded fill.
     let quote = api::http_json(
         host,
         "POST",
-        format!("{}/v3/sdk/{}/convert", crate::API, crate::CHAIN_ID),
+        format!("{}/v3/sdk/{}/convert", crate::API, chain.id()),
         Some(json!({
             "inputs":[{"token":input_token,"amount":request.amount}], "outputs":[output_token],
-            "receiver":owner,"slippage":f64::from(request.slippage_bps)/10000.0,"enableAggregator":false
+            "receiver":owner,"slippage":f64::from(request.slippage_bps)/10000.0,
+            "enableAggregator":false,"useLimitOrder":false
         })),
     )?;
     let inputs = quote["inputs"].as_array().ok_or("quote omitted inputs")?;
@@ -149,6 +170,7 @@ pub fn create<H: Host>(
     }
     let current_allowance = evm::call(
         host,
+        chain,
         address(&input_token)?,
         evm::allowanceCall {
             owner: address(&owner)?,
@@ -180,7 +202,8 @@ pub fn create<H: Host>(
     add("pendle_execution", transaction);
     let created_ms = host.now_ms();
     let draft = Draft {
-        schema: "bloom.pendle.operation.v1".into(),
+        schema: SCHEMA.into(),
+        chain,
         id: id.into(),
         wallet: account.wallet().into(),
         account: account.number(),
@@ -207,11 +230,12 @@ pub fn create<H: Host>(
 /// Reconcile only: status reads never stage, sign or broadcast transactions.
 pub fn reconcile<H: Host>(
     host: &mut H,
+    chain: Chain,
     account: &WalletAccount,
     op: Operation,
     id: &str,
 ) -> Result<Draft> {
-    let mut draft = load(host, account, op, id)?;
+    let mut draft = load(host, chain, account, op, id)?;
     for step in &mut draft.steps {
         let Some(id) = &step.outbox_id else {
             continue;
@@ -219,7 +243,7 @@ pub fn reconcile<H: Host>(
         if matches!(step.state.as_str(), "confirmed" | "reverted") {
             continue;
         }
-        let observed = host.inspect(account.wallet(), id)?;
+        let observed = host.inspect(account.wallet(), chain, id)?;
         step.tx_hash = observed.tx_hash;
         if let Some(receipt) = observed.receipt_json {
             let receipt: Value =
@@ -249,6 +273,7 @@ pub fn reconcile<H: Host>(
 
 pub fn confirm<H: Host>(
     host: &mut H,
+    chain: Chain,
     account: &WalletAccount,
     op: Operation,
     id: &str,
@@ -257,15 +282,21 @@ pub fn confirm<H: Host>(
     if body != b"confirm" {
         return Err("write exactly 'confirm' to advance one reviewed outbox step".into());
     }
-    let lock = format!("locks/{}/{}", op.name(), operation_id(id)?);
+    let lock = lock_key(chain, op, id)?;
     let token = format!("{}:{}", account.wallet(), host.now_ms()).into_bytes();
     host.put_new(&lock, &token)?;
-    let result = advance(host, account, op, id);
+    let result = advance(host, chain, account, op, id);
     let released = host.delete_if(&lock, &token);
     result.and(released)
 }
-fn advance<H: Host>(host: &mut H, account: &WalletAccount, op: Operation, id: &str) -> Result<()> {
-    let mut draft = reconcile(host, account, op, id)?;
+fn advance<H: Host>(
+    host: &mut H,
+    chain: Chain,
+    account: &WalletAccount,
+    op: Operation,
+    id: &str,
+) -> Result<()> {
+    let mut draft = reconcile(host, chain, account, op, id)?;
     if draft.state == "execution_confirmed" {
         return save(host, &draft);
     }
@@ -288,8 +319,14 @@ fn advance<H: Host>(host: &mut H, account: &WalletAccount, op: Operation, id: &s
     if host.now_ms() > draft.expires_ms {
         return Err("quote expired; reconcile prior steps and create a new reviewed intent".into());
     }
-    // Recheck factory membership, maturity and exact calldata on every write.
-    evm::verify_market(host, &draft.market, op, address(&draft.request.token)?)?;
+    // Recheck chain, factory membership, maturity and exact calldata on every write.
+    evm::verify_market(
+        host,
+        chain,
+        &draft.market,
+        op,
+        address(&draft.request.token)?,
+    )?;
     let execution = &draft
         .steps
         .last()
@@ -298,7 +335,7 @@ fn advance<H: Host>(host: &mut H, account: &WalletAccount, op: Operation, id: &s
     evm::validate_transaction(execution, &draft.owner, op, &draft.request, &draft.market)?;
     if let Some(outbox_id) = draft.steps[index].outbox_id.clone() {
         // tx_confirm retains the exact existing outbox id across ceremonies.
-        match host.confirm(account.wallet(), &outbox_id) {
+        match host.confirm(account.wallet(), chain, &outbox_id) {
             Ok(outcome) => {
                 // ApprovalPending is a successful host response, not a
                 // broadcast. Keep the same step confirmable after ceremony.
@@ -326,7 +363,7 @@ fn advance<H: Host>(host: &mut H, account: &WalletAccount, op: Operation, id: &s
         let tx = &draft.steps[index].transaction;
         let staged = host.stage(&EvmTransaction {
             wallet: account.wallet().into(),
-            chain: crate::CHAIN.into(),
+            chain: chain.name().into(),
             to: tx.to.clone(),
             value_wei: tx.value.clone(),
             data_hex: tx.data.clone(),
@@ -341,18 +378,39 @@ fn advance<H: Host>(host: &mut H, account: &WalletAccount, op: Operation, id: &s
     }
 }
 
+/// Symbol and decimals of a token named by the market, so base units can be read.
+fn describe(market: &api::Market, token: &str) -> String {
+    [
+        &market.pt,
+        &market.yt,
+        &market.sy,
+        &market.underlying_asset,
+        &market.accounting_asset,
+    ]
+    .into_iter()
+    .chain(&market.input_tokens)
+    .chain(&market.output_tokens)
+    .find(|t| t.address.eq_ignore_ascii_case(token))
+    .map_or_else(
+        || format!("{token} (not named by the market)"),
+        |t| format!("{token} ({}, {} decimals)", t.symbol, t.decimals),
+    )
+}
+
 pub fn plan(draft: &Draft) -> String {
     format!(
-        "# Pendle {}\n\nWallet/account: {}/{}\nChain: arbitrum (42161)\nOwner/receiver: {}\nMarket: {}\nMaturity: {}\nInput token: {}\nInput base units: {}\nOutput token: {}\nExpected output base units (API estimate): {}\nMinimum output enforced in calldata: {}\nPrice impact (API estimate): {}\nQuote expires at: {} ms\nAccounting asset: {} ({})\nUnderlying asset: {} ({})\n\n{} outbox steps; each requires its own Bloom authorization. Inspect status.json, then write `confirm` to confirm.json to advance one step. A successful receipt is execution evidence, not an independent APY or redemption-value guarantee. Router: {}.\n",
+        "# Pendle {}\n\nWallet/account: {}/{}\nChain: {} ({})\nOwner/receiver: {}\nMarket: {}\nMaturity: {}\nInput token: {}\nInput base units: {}\nOutput token: {}\nExpected output base units (API estimate): {}\nMinimum output enforced in calldata: {}\nPrice impact (API estimate): {}\nQuote expires at: {} ms\nAccounting asset: {} ({})\nUnderlying asset: {} ({})\n\n{} outbox steps; each requires its own Bloom authorization. Inspect status.json, then write `confirm` to confirm.json to advance one step. A successful receipt is execution evidence, not an independent APY or redemption-value guarantee. Router: {}.\n",
         draft.operation.name(),
         draft.wallet,
         draft.account,
+        draft.chain.name(),
+        draft.chain.id(),
         draft.owner,
         draft.request.market,
         draft.market.expiry,
-        draft.input_token,
+        describe(&draft.market, &draft.input_token),
         draft.request.amount,
-        draft.output_token,
+        describe(&draft.market, &draft.output_token),
         draft.expected_output,
         draft.encoded_minimum,
         draft.price_impact,

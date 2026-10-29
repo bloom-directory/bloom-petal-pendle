@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Acceptance against an already-running DISPOSABLE triad and local Arbitrum fork.
+"""Acceptance against an already-running DISPOSABLE triad and a local fork of one chain.
 
 Creates a new wallet through software owner ceremonies. No production funds or
 wallet secrets are used. The supplied RPC must identify itself as local Anvil.
@@ -17,11 +17,33 @@ import urllib.parse
 import urllib.request
 import urllib.error
 
-MARKET = "0xf86119a39f8654f38acbbd5488bd83f3f51983c8"
-SY = "0x30ccf4bbee313fcd19f3e295b3ba2920a24e2f62"
-PT = "0xe9d07c2a3588b9a25edd55664be44ecfe5f92fce"
 ROUTER = "0x888888888889758f76e7103c6cbf23abbf58f946"
 ROOT = Path(__file__).resolve().parents[1]
+# One market per chain. `token` is what the test buys PT with and sells PT for;
+# `balance_slot` is that token's ERC-20 balance mapping slot, for `cast index`.
+# `buy_floor` is in PT base units for a 1e18 input.
+CHAINS = {
+    "arbitrum": {
+        "chain_id": 42161,
+        "market": "0xf86119a39f8654f38acbbd5488bd83f3f51983c8",
+        "pt": "0xe9d07c2a3588b9a25edd55664be44ecfe5f92fce",
+        # SY-sUSDai itself; its verified balance mapping is slot 2.
+        "token": "0x30ccf4bbee313fcd19f3e295b3ba2920a24e2f62",
+        "balance_slot": "2",
+        "buy_floor": 10**18,
+    },
+    "ethereum": {
+        "chain_id": 1,
+        "market": "0x13285bcbc27f92b47b4edb99d744c07b48c977c0",
+        # PT-reUSD has 6 decimals.
+        "pt": "0xecfafdc7741323a945a163ed068b5a3c43483957",
+        # reUSD, the only token the reUSD SY accepts. OpenZeppelin v5
+        # ERC20Upgradeable keeps balances in its ERC-7201 namespace.
+        "token": "0x5086bf358635b81d8c47c66d1c8b9e567db70c72",
+        "balance_slot": "0x52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace00",
+        "buy_floor": 10**6,
+    },
+}
 
 
 def main():
@@ -30,7 +52,11 @@ def main():
     parser.add_argument("--driver", required=True, type=Path)
     parser.add_argument("--rpc", required=True)
     parser.add_argument("--report", required=True, type=Path)
+    parser.add_argument("--chain", choices=sorted(CHAINS), default="arbitrum")
     args = parser.parse_args()
+    chain = args.chain
+    config = CHAINS[chain]
+    MARKET, PT, TOKEN = config["market"], config["pt"], config["token"]
     assert urllib.parse.urlparse(args.rpc).hostname in ("localhost", "127.0.0.1"), "local fork only"
     assert not args.report.resolve().is_relative_to(ROOT), "evidence must live outside the package"
     env = os.environ.copy()
@@ -49,7 +75,7 @@ def main():
     wallet = "pendle-" + str(time.time_ns())[-12:]
     auth_seed = "pendle-disposable-software-owner-" + wallet
     work = args.triad_env.resolve().parent.parent
-    report = {"sdk_revision": "7dd2722db5de305dd63ca4ed03591f3ab82fa40b", "wallet": wallet, "account": 1, "checks": [], "transactions": []}
+    report = {"sdk_revision": "7dd2722db5de305dd63ca4ed03591f3ab82fa40b", "chain": chain, "wallet": wallet, "account": 1, "checks": [], "transactions": []}
 
     def command(argv, check=True):
         p = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=90)
@@ -104,7 +130,10 @@ def main():
         print("PASS " + label, flush=True)
 
     assert "anvil" in rpc("web3_clientVersion", []).lower()
-    assert int(rpc("eth_chainId", []), 16) == 42161
+    assert int(rpc("eth_chainId", []), 16) == config["chain_id"]
+    # A fresh fork refuses eth_call ("Excess blob gas not set") until it has
+    # mined a block of its own.
+    rpc("evm_mine", [])
     report["fork_start_block"] = int(rpc("eth_blockNumber", []), 16)
     status = json.loads(read("/petals/pendle/status.json"))
     assert status["sdk_revision"] == report["sdk_revision"]
@@ -112,8 +141,12 @@ def main():
     report["package_hash"] = launch_field(built, "hash")
     report["machine_binary_sha256"] = hashlib.sha256(Path(binary).read_bytes()).hexdigest()
     passed("compiled SDK42 package reachable through real triad")
-    assert json.loads(read("/petals/pendle/arbitrum/markets.json"))
-    assert json.loads(read(f"/petals/pendle/arbitrum/markets/{MARKET}/info.json"))["address"] == MARKET
+    markets = json.loads(read(f"/petals/pendle/{chain}/markets.json"))
+    assert markets["chainId"] == config["chain_id"] and not markets["truncated"]
+    assert markets["count"] == markets["total"]
+    assert any(m["address"] == MARKET for m in markets["results"])
+    report["active_markets"] = markets["total"]
+    assert json.loads(read(f"/petals/pendle/{chain}/markets/{MARKET}/info.json"))["address"] == MARKET
     passed("live Pendle discovery and market API through WASM")
     complete(launch_field(cli("wallet", "new", wallet).stdout, "ceremony_url"))
     write(f"/wallets/{wallet}/new", {"request_id": "account-one"})
@@ -141,7 +174,8 @@ def main():
     passed("Signer-created account one differs from account zero")
     policy = json.loads(read(f"/wallets/{wallet}/policy.json"))
     policy["allowed_petal_packages"] = [report["package_hash"]]
-    policy["allowed_destinations"] = [{"chain": "arbitrum", "destination": d} for d in sorted([SY, PT, ROUTER])]
+    # The token approval goes to the input token for a buy and to PT for a sell.
+    policy["allowed_destinations"] = [{"chain": chain, "destination": d} for d in sorted({TOKEN, PT, ROUTER})]
     policy_file = work / (wallet + "-policy.json")
     policy_file.write_text(json.dumps(policy))
     launch = cli("wallet", "update-policy", wallet, "--file", str(policy_file)).stdout
@@ -149,19 +183,20 @@ def main():
     cli("wallet", "commit-policy", launch_field(launch, "operation_id"))
     passed("package and exact destinations authorized by owner policy ceremony")
     rpc("anvil_setBalance", [owner, hex(10**20)])
-    # Fork-only test balance. SY-sUSDai's verified balance mapping is slot 2;
-    # assert the effect before using it. No changes are sent to public Arbitrum.
-    index = command(["cast", "index", "address", owner, "2"]).stdout.strip()
-    assert balance(SY, owner) == 0
-    rpc("anvil_setStorageAt", [SY, index, "0x" + hex(10**19)[2:].rjust(64, "0")])
-    assert balance(SY, owner) == 10**19
+    # Fork-only test balance, written to the token's balance mapping. Assert the
+    # effect before using it. No changes are sent to the public chain.
+    index = command(["cast", "index", "address", owner, config["balance_slot"]]).stdout.strip()
+    assert balance(TOKEN, owner) == 0
+    rpc("anvil_setStorageAt", [TOKEN, index, "0x" + hex(10**19)[2:].rjust(64, "0")])
+    assert balance(TOKEN, owner) == 10**19
     passed("disposable account funded only on local fork")
-    assert json.loads(read(f"/petals/pendle/arbitrum/accounts/{wallet}/1/portfolio.json")) is not None
+    portfolio = json.loads(read(f"/petals/pendle/{chain}/accounts/{wallet}/1/portfolio.json"))
+    assert all(p["chainId"] == config["chain_id"] for p in portfolio["positions"])
     passed("selected-account live portfolio API")
 
     def execute(op, name, input_amount, floor):
-        base = f"/petals/pendle/arbitrum/{op}/{wallet}/1/{name}"
-        request = {"market": MARKET, "token": SY, "amount": str(input_amount), "min_output": str(floor), "slippage_bps": 50, "max_price_impact_bps": 100}
+        base = f"/petals/pendle/{chain}/{op}/{wallet}/1/{name}"
+        request = {"market": MARKET, "token": TOKEN, "amount": str(input_amount), "min_output": str(floor), "slippage_bps": 50, "max_price_impact_bps": 100}
         write(base + "/draft.json", request)
         original = json.loads(read(base + "/status.json"))
         assert original["account"] == 1 and original["owner"].lower() == owner
@@ -188,7 +223,7 @@ def main():
             for step in observed["steps"]:
                 if not step["outbox_id"] or step["state"] == "confirmed":
                     continue
-                challenge = cli("vfs", "cat", f"/wallets/{wallet}/1/chains/arbitrum/outbox/pending/{step['outbox_id']}/approval_challenge.json", check=False)
+                challenge = cli("vfs", "cat", f"/wallets/{wallet}/1/chains/{chain}/outbox/pending/{step['outbox_id']}/approval_challenge.json", check=False)
                 if challenge.returncode == 0:
                     value = json.loads(challenge.stdout)
                     if value.get("ceremony_url"):
@@ -199,17 +234,17 @@ def main():
         raise RuntimeError(op + " timed out")
 
     pt_before = balance(PT, owner)
-    bought = execute("buy-pt", "accept-buy", 10**18, 10**18)
+    bought = execute("buy-pt", "accept-buy", 10**18, config["buy_floor"])
     pt_delta = balance(PT, owner) - pt_before
     assert pt_delta >= int(bought["encoded_minimum"])
     assert balance(PT, owner_zero) == 0
     report["pt_received"] = str(pt_delta)
     passed("PT buy mined through Broker/Signer; account-one output meets encoded floor")
-    sy_before = balance(SY, owner)
+    token_before = balance(TOKEN, owner)
     sold = execute("sell-pt", "accept-sell", pt_delta // 2, 1)
-    sy_delta = balance(SY, owner) - sy_before
-    assert sy_delta >= int(sold["encoded_minimum"])
-    report["sy_received_on_sell"] = str(sy_delta)
+    token_delta = balance(TOKEN, owner) - token_before
+    assert token_delta >= int(sold["encoded_minimum"])
+    report["token_received_on_sell"] = str(token_delta)
     passed("PT sell mined through Broker/Signer; output meets encoded floor")
     report["software_owner_ceremonies"] = count
     report["scope"] = "Local fork with real Pendle contracts, compiled WASM and real triad processes; fixture balances and software passkeys. No mainnet broadcast or physical-passkey acceptance."

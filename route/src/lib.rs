@@ -9,17 +9,38 @@ use petal::{DispatchResponse, WalletAccount};
 use serde::{Deserialize, Serialize};
 
 pub type Result<T> = std::result::Result<T, String>;
-pub const CHAIN: &str = "arbitrum";
-pub const CHAIN_ID: u64 = 42161;
+/// Pendle's router has the same address on every supported chain.
 pub const ROUTER: &str = "0x888888888889758f76e7103c6cbf23abbf58f946";
 pub const API: &str = "https://api-v2.pendle.finance/core";
 pub const SDK_REV: &str = "7dd2722db5de305dd63ca4ed03591f3ab82fa40b";
 
-pub fn chain(value: &str) -> Result<()> {
-    if value == CHAIN {
-        Ok(())
-    } else {
-        Err("only arbitrum is supported".into())
+/// A supported chain. The name is Bloom's chain name. The id is pinned here;
+/// live `eth_chainId` reads only confirm it.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Chain {
+    Ethereum,
+    Arbitrum,
+}
+impl Chain {
+    pub const ALL: [Self; 2] = [Self::Ethereum, Self::Arbitrum];
+    pub fn parse(value: &str) -> Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|chain| chain.name() == value)
+            .ok_or_else(|| "supported chains are ethereum and arbitrum".into())
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Ethereum => "ethereum",
+            Self::Arbitrum => "arbitrum",
+        }
+    }
+    pub fn id(self) -> u64 {
+        match self {
+            Self::Ethereum => 1,
+            Self::Arbitrum => 42161,
+        }
     }
 }
 pub fn address(value: &str) -> Result<Address> {
@@ -55,10 +76,11 @@ pub fn operation_id(value: &str) -> Result<&str> {
     }
     Ok(value)
 }
-pub fn selected(ctx: &petal::Ctx) -> std::result::Result<WalletAccount, DispatchResponse> {
-    let selected_chain = petal::param(ctx, "chain")?;
-    chain(selected_chain).map_err(petal::route_invalid)?;
-    petal::wallet_account(ctx)
+pub fn route_chain(ctx: &petal::Ctx) -> std::result::Result<Chain, DispatchResponse> {
+    Chain::parse(petal::param(ctx, "chain")?).map_err(petal::route_invalid)
+}
+pub fn selected(ctx: &petal::Ctx) -> std::result::Result<(Chain, WalletAccount), DispatchResponse> {
+    Ok((route_chain(ctx)?, petal::wallet_account(ctx)?))
 }
 pub fn response<T: Serialize>(result: Result<T>) -> DispatchResponse {
     match result {

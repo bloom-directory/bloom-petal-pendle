@@ -1,0 +1,44 @@
+{
+  "chainId": 1,
+  "address": "0x13285bcbc27f92b47b4edb99d744c07b48c977c0",
+  "expiry": "2026-12-10T00:00:00.000Z",
+  "pt": {
+    "address": "0xecfafdc7741323a945a163ed068b5a3c43483957",
+    "symbol": "PT-reUSD-10DEC2026",
+    "decimals": 6
+  },
+  "yt": {
+    "address": "0xa8bd3b21291ace53927b35563fc80615919e63d7",
+    "symbol": "YT-reUSD-10DEC2026",
+    "decimals": 6
+  },
+  "sy": {
+    "address": "0x9487bd5a3b16ecb5f3184453e3ee75b800141648",
+    "symbol": "SY-reUSD",
+    "decimals": 18
+  },
+  "accountingAsset": {
+    "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    "symbol": "USDC",
+    "decimals": 6
+  },
+  "underlyingAsset": {
+    "address": "0x5086bf358635b81d8c47c66d1c8b9e567db70c72",
+    "symbol": "reUSD",
+    "decimals": 18
+  },
+  "inputTokens": [
+    {
+      "address": "0x5086bf358635b81d8c47c66d1c8b9e567db70c72",
+      "symbol": "reUSD",
+      "decimals": 18
+    }
+  ],
+  "outputTokens": [
+    {
+      "address": "0x5086bf358635b81d8c47c66d1c8b9e567db70c72",
+      "symbol": "reUSD",
+      "decimals": 18
+    }
+  ]
+}
