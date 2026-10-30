@@ -13,8 +13,11 @@ All account routes use adjacent `[wallet]/[index]` captures and
 sender/receiver. Keep route composition in `route/files/` and reusable ABI,
 HTTP, persistence and transaction logic in focused `route/src/` modules.
 
-Every route under `[chain]` resolves it with `Chain::parse`, and every chain
-read, stage, confirm, inspect, Pendle URL and store key takes that `Chain`.
+Every route under `[chain]` resolves it with `route_chain` or `selected`, so an
+unsupported chain is refused even by static listings. The exception is the
+`[wallet]/$index.rs` listings, which stay `petal::account_listing!()` because
+Bloom lists the accounts itself. Every chain read, stage, confirm, inspect,
+Pendle URL and store key takes that `Chain`.
 `Chain::id()` is the trust anchor: a live `eth_chainId` read only confirms it.
 To add a chain:
 - add a `Chain` variant with Bloom's chain name and its id;

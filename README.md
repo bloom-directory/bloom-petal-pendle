@@ -37,10 +37,10 @@ Each result has the market `address`, `name`, `expiry`, the `pt`, `yt`, `sy`,
 `underlyingAsset` and `accountingAsset` addresses, `inputTokens` and
 `outputTokens` (what the SY accepts and pays out), `liquidityUsd` and
 `impliedApy`. The Petal reads up to 400 markets in pages of 40; `truncated` is
-`true` if Pendle listed more. Symbols and decimals are in `info.json`. Decimals
-differ between markets: PT-reUSD on Ethereum has 6, for example. A zero address
-in `inputTokens` or `outputTokens` is the native token (ETH), which some SYs
-accept; drafts do not accept it yet.
+`true` when fewer distinct markets came back than Pendle's `total`. Symbols
+and decimals are in `info.json`. Decimals differ between markets: PT-reUSD on
+Ethereum has 6, for example. A zero address in `inputTokens` or `outputTokens`
+is the native token (ETH), which some SYs accept; drafts do not accept it yet.
 
 Draft body (all amounts are decimal strings in base units):
 
@@ -82,7 +82,11 @@ for that chain reports the expected chain id. It then authenticates the market
 against that chain's official factories, pinned from Pendle's
 `deployments/<chain id>-core.json`, and checks its tokens onchain. It
 independently decodes the returned ABI bytes, matching the router, sender,
-receiver, market, assets, exact input and encoded minimum output. Quotes are
+receiver, market, assets, exact input and encoded minimum output. The encoded
+minimum must be at least `min_output` and at least
+`floor(expected × (10000 − slippage_bps) / 10000)`, which is how Pendle
+encodes it. The expected output is Pendle's estimate, so `min_output` is the
+one floor that doesn't come from Pendle: set it yourself. Quotes are
 requested with Pendle's limit-order fills turned off. It refuses external
 aggregators, limit-order fills, native assets, unsupported selectors and
 noncanonical/trailing calldata. Every `confirm` repeats the chain, factory,
@@ -90,15 +94,22 @@ maturity and calldata checks before staging.
 
 The wallet's policy must allow each transaction's target on that chain: the
 Pendle router, the input token for a buy's approval, and the PT for a sell's
-approval. Destinations are per chain, so Ethereum needs its own entries.
+or redemption's approval. Destinations are per chain, so Ethereum needs its
+own entries.
 
 The plan contains exact-amount token approval steps only when allowance is
 insufficient. A nonzero insufficient allowance is reset first. Each write to
 `confirm.json` advances one step through Bloom's outbox. Complete the owner
 approval shown by Bloom, then retry the same path. Status exposes the outbox
 IDs so the owner can inspect pending approvals in the selected account.
+`plan.md` reads the input and output decimals from the tokens onchain. Token
+symbols and the maturity date are Pendle's, printed without line breaks or
+markup.
 
-Quotes expire after five minutes. Expiry does not cancel an already submitted
+Quotes expire after five minutes. After that, `confirm` stages nothing new and
+requests no new owner approval. It still broadcasts a step whose approval was
+already requested, so a ceremony that outlasts the quote doesn't leave an
+approved entry stuck in the outbox. Expiry does not cancel a submitted
 transaction or revoke an allowance. Reconcile previous steps before creating
 a fresh intent. Lost stage replies are `staging_unknown` and never restaged.
 A persisted writer lock after a crash requires operator inspection; locks are

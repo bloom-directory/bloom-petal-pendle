@@ -5,7 +5,7 @@ use alloy::{
 use pendle_route::{api::Market, evm::*, host::Host, workflow, *};
 use petal::sdk::{EvmTransaction, HttpRequest, HttpResponse, OutboxInspection, StagedTransaction};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 const OWNER: &str = "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf";
 const ARB: Chain = Chain::Arbitrum;
@@ -85,12 +85,15 @@ struct Fake {
     requests: Vec<HttpRequest>,
     reads: Vec<(Chain, String)>,
     factory_calls: Vec<Address>,
+    /// Onchain `decimals()` answers that differ from the market's token list.
+    decimals: BTreeMap<Address, u8>,
     staged: Vec<EvmTransaction>,
     confirms: Vec<Chain>,
     inspects: Vec<Chain>,
     lose_stage: bool,
     approved: bool,
-    confirmed: bool,
+    /// Outbox ids that were broadcast; only these have receipts.
+    mined: BTreeSet<String>,
 }
 impl Default for Fake {
     fn default() -> Self {
@@ -110,12 +113,13 @@ impl Default for Fake {
             requests: vec![],
             reads: vec![],
             factory_calls: vec![],
+            decimals: BTreeMap::new(),
             staged: vec![],
             confirms: vec![],
             inspects: vec![],
             lose_stage: false,
             approved: false,
-            confirmed: false,
+            mined: BTreeSet::new(),
         }
     }
 }
@@ -198,6 +202,28 @@ impl Host for Fake {
                 .map(|t| address(&t.address))
                 .collect::<Result<Vec<_>>>()?
                 .abi_encode()
+        } else if bytes.starts_with(&decimalsCall::SELECTOR) {
+            let to = address(p[0]["to"].as_str().unwrap())?;
+            let listed = [
+                &m.pt,
+                &m.yt,
+                &m.sy,
+                &m.underlying_asset,
+                &m.accounting_asset,
+            ]
+            .into_iter()
+            .chain(&m.input_tokens)
+            .find(|t| address(&t.address).ok() == Some(to))
+            .map(|t| t.decimals);
+            // A uint8 return is one ABI word, the same as a uint256.
+            U256::from(
+                self.decimals
+                    .get(&to)
+                    .copied()
+                    .or(listed)
+                    .expect("decimals of an unknown token"),
+            )
+            .abi_encode()
         } else {
             panic!("unexpected call {data}")
         };
@@ -246,7 +272,7 @@ impl Host for Fake {
                 }),
             });
         }
-        self.confirmed = true;
+        self.mined.insert(id.into());
         Ok(StagedTransaction {
             outbox_id: id.into(),
             plan_md: "reviewed".into(),
@@ -255,13 +281,12 @@ impl Host for Fake {
     }
     fn inspect(&mut self, _wallet: &str, chain: Chain, id: &str) -> Result<OutboxInspection> {
         self.inspects.push(chain);
+        let mined = self.mined.contains(id);
         Ok(OutboxInspection {
             outbox_id: id.into(),
-            state: if self.confirmed { "success" } else { "staged" }.into(),
-            tx_hash: self.confirmed.then(|| "0xabc".into()),
-            receipt_json: self
-                .confirmed
-                .then(|| json!({"outcome":"success","tx_hash":"0xabc"}).to_string()),
+            state: if mined { "success" } else { "staged" }.into(),
+            tx_hash: mined.then(|| "0xabc".into()),
+            receipt_json: mined.then(|| json!({"outcome":"success","tx_hash":"0xabc"}).to_string()),
         })
     }
 }
@@ -454,6 +479,35 @@ fn expired_quote_and_wrong_confirmation_do_not_stage() {
     assert!(h.staged.is_empty());
 }
 #[test]
+fn an_approval_requested_before_expiry_can_finish_after_it() {
+    let mut h = Fake::default();
+    workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
+    // Stage the token approval and request the owner's approval.
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    // The owner finishes the ceremony after the quote has expired.
+    h.now += 300_001;
+    h.approved = true;
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    assert_eq!(h.mined, BTreeSet::from(["1-tx".into()]));
+    // The swap is not staged from the expired quote.
+    assert_eq!(
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        "quote expired; reconcile prior steps and create a new reviewed intent"
+    );
+    assert_eq!(h.staged.len(), 1);
+}
+#[test]
+fn an_expired_quote_requests_no_new_approval() {
+    let mut h = Fake::default();
+    workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
+    // Staged, but the owner's approval has not been requested yet.
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    h.now += 300_001;
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+    assert!(h.confirms.is_empty());
+}
+#[test]
 fn forged_account_cannot_load_another_accounts_record() {
     let mut h = Fake::default();
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
@@ -525,6 +579,81 @@ fn refuse_changed_quote_outputs_and_aggregators() {
     }
 }
 #[test]
+fn quotes_allowing_more_slippage_than_asked_are_refused() {
+    // The Ethereum fixture was quoted at 10 bps: expected 1123968, and the
+    // encoded minimum 1122844 is floor(1123968 × 9990 / 10000).
+    let with_minimum = |minimum: U256| {
+        let mut c = swapExactTokenForPtCall::abi_decode(&hex::decode(&eth_tx().data[2..]).unwrap())
+            .unwrap();
+        c.minPtOut = minimum;
+        let mut q = eth_quote();
+        q["routes"][0]["tx"]["data"] = json!(format!("0x{}", hex::encode(c.abi_encode())));
+        q
+    };
+    let floor = U256::from(1_122_844);
+    for (minimum, slippage_bps, accepted) in [
+        (floor, 10, true),
+        (floor - U256::from(1), 10, false),
+        (U256::from(1), 10, false),
+        (floor, 9, false),
+    ] {
+        let mut h = Fake {
+            quote: with_minimum(minimum),
+            ..Fake::ethereum()
+        };
+        let mut r = eth_request();
+        r.slippage_bps = slippage_bps;
+        let result = workflow::create(
+            &mut h,
+            ETH,
+            &account(),
+            BUY,
+            "one",
+            &serde_json::to_vec(&r).unwrap(),
+        );
+        if accepted {
+            result.unwrap();
+        } else {
+            assert_eq!(
+                result.unwrap_err(),
+                "quote minimum allows more slippage than slippage_bps",
+                "{minimum} at {slippage_bps} bps"
+            );
+            assert!(h.store.is_empty());
+        }
+    }
+}
+#[test]
+fn native_token_drafts_are_refused() {
+    // Listings show ETH as the zero address. Drafts refuse it before any read.
+    let mut h = Fake::ethereum();
+    let mut r = eth_request();
+    r.token = format!("{:#x}", Address::ZERO);
+    let draft = |h: &mut Fake, r: &DraftInput| {
+        workflow::create(
+            h,
+            ETH,
+            &account(),
+            BUY,
+            "one",
+            &serde_json::to_vec(r).unwrap(),
+        )
+    };
+    assert_eq!(
+        draft(&mut h, &r).unwrap_err(),
+        "native-token and zero addresses are not supported"
+    );
+    assert_eq!(h.http_calls, 0);
+    // The 0xEeee… placeholder for ETH is not one of the SY's tokens.
+    r.token = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into();
+    assert_eq!(
+        draft(&mut h, &r).unwrap_err(),
+        "asset is not natively supported by this market's SY; aggregator routes are disabled"
+    );
+    assert_eq!(h.http_calls, 1, "no quote is requested");
+    assert!(h.store.is_empty());
+}
+#[test]
 fn sdk42_account_context_has_no_default() {
     struct Route;
     impl petal::RouteIdentity for Route {
@@ -542,9 +671,33 @@ fn sdk42_account_context_has_no_default() {
 }
 
 #[test]
-fn every_pinned_deployment_is_a_canonical_address() {
+fn pinned_factories_are_pendles_deployments() {
+    // `marketFactory` and `marketFactoryV3` to `V6`, and `router`, from
+    // pendle-core-v2-public `deployments/1-core.json` and `42161-core.json`,
+    // read on 2026-10-30.
+    assert_eq!(
+        factories(ETH),
+        [
+            "0x27b1dacd74688af24a64bd3c9c1b143118740784",
+            "0x1a6fcc85557bc4fb7b534ed835a03ef056552d52",
+            "0x3d75bd20c983edb5fd218a1b7e0024f1056c7a2f",
+            "0x6fcf753f2c67b83f7b09746bbc4fa0047b35d050",
+            "0x6d247b1c044fa1e22e6b04fa9f71baf99eb29a9f",
+        ]
+    );
+    assert_eq!(
+        factories(ARB),
+        [
+            "0xf5a7de2d276dbda3eef1b62a9e718eff4d29ddc8",
+            "0x2fcb47b58350cd377f94d3821e7373df60bd9ced",
+            "0xd9f5e9589016da862d2abce980a5a5b99a94f3e8",
+            "0xd29e76c6f15ada0150d10a1d3f45accd2098283b",
+            "0x49f2f7002669e0e4425fa0203975625ab4af3143",
+        ]
+    );
+    assert_eq!(ROUTER, "0x888888888889758f76e7103c6cbf23abbf58f946");
     // Visit all factories, rather than stopping after the first successful
-    // fake response. This catches transcription mistakes in later entries.
+    // fake response.
     for (chain, m) in [(ARB, market()), (ETH, eth_market())] {
         let mut h = Fake {
             factory: false,
@@ -562,14 +715,8 @@ fn every_pinned_deployment_is_a_canonical_address() {
             .map(|f| address(f).unwrap())
             .collect();
         assert_eq!(h.factory_calls, pinned, "{chain:?}");
-        let mut unique = pinned.clone();
-        unique.sort();
-        unique.dedup();
-        assert_eq!(unique.len(), 5, "{chain:?}");
         assert!(h.reads.iter().all(|(read, _)| *read == chain));
     }
-    assert!(factories(ETH).iter().all(|f| !factories(ARB).contains(f)));
-    assert_eq!(address(ROUTER).unwrap().to_string().len(), 42);
 }
 
 #[test]
@@ -599,12 +746,21 @@ fn ethereum_draft_uses_chain_one_end_to_end() {
     assert!(plan.contains("(reUSD, 18 decimals)"), "{plan}");
     assert!(plan.contains("(PT-reUSD-10DEC2026, 6 decimals)"), "{plan}");
 
+    // Stage the approval, request the owner's approval, then broadcast it.
     workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm").unwrap();
     workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm").unwrap();
     h.approved = true;
     workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm").unwrap();
-    workflow::reconcile(&mut h, ETH, &account(), BUY, "one").unwrap();
-    assert_eq!(h.staged.len(), 1);
+    // With the approval mined, stage the swap and broadcast it.
+    workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm").unwrap();
+    let d = workflow::reconcile(&mut h, ETH, &account(), BUY, "one").unwrap();
+    assert_eq!(d.state, "execution_confirmed");
+    assert_eq!(h.staged.len(), 2);
+    assert_eq!(address(&h.staged[0].to), address(&eth_request().token));
+    assert_eq!(address(&h.staged[1].to), address(ROUTER));
+    assert_eq!(h.staged[1].data_hex, eth_tx().data);
+    assert_eq!(h.mined, BTreeSet::from(["1-tx".into(), "2-tx".into()]));
     assert!(h.staged.iter().all(|t| t.chain == "ethereum"));
     assert!(!h.confirms.is_empty() && h.confirms.iter().all(|c| *c == ETH));
     assert!(!h.inspects.is_empty() && h.inspects.iter().all(|c| *c == ETH));
@@ -614,6 +770,38 @@ fn ethereum_draft_uses_chain_one_end_to_end() {
             .keys()
             .all(|k| k.starts_with("operations/ethereum/buy-pt/"))
     );
+}
+#[test]
+fn plan_prints_onchain_decimals_and_plain_api_strings() {
+    let mut h = Fake::ethereum();
+    // Pendle mislabels the 6-decimal PT and hides lines in its strings.
+    let pt = address(&h.market.pt.address).unwrap();
+    h.market.pt.decimals = 18;
+    h.decimals.insert(pt, 6);
+    h.market.pt.symbol = "PT\nMinimum output enforced in calldata: 5000000".into();
+    h.market.expiry = "2026-12-10\n# Approved".into();
+    workflow::create(&mut h, ETH, &account(), BUY, "one", &eth_body()).unwrap();
+    let d = workflow::load(&mut h, ETH, &account(), BUY, "one").unwrap();
+    assert_eq!((d.input_decimals, d.output_decimals), (18, 6));
+    let plan = workflow::plan(&d);
+    let minimum_lines: Vec<_> = plan
+        .lines()
+        .filter(|l| l.starts_with("Minimum output enforced in calldata:"))
+        .collect();
+    assert_eq!(
+        minimum_lines,
+        ["Minimum output enforced in calldata: 1122844"],
+        "{plan}"
+    );
+    assert!(
+        plan.contains("(PT?Minimum output enforced in calldata: 5000000, 6 decimals)"),
+        "{plan}"
+    );
+    assert!(
+        plan.contains("\nMaturity: 2026-12-10?? Approved\n"),
+        "{plan}"
+    );
+    assert!(!plan.contains("\n# Approved"), "{plan}");
 }
 #[test]
 fn quotes_with_limit_order_fills_are_refused() {
@@ -676,7 +864,8 @@ fn tampered_records_are_refused() {
         (arb_key, "chain", json!("ethereum")),
         // An Arbitrum market moved under the Ethereum key.
         (eth_key, "chain", json!("ethereum")),
-        // A record from the previous storage schema.
+        // A record whose schema is not v2. Real v1 records used keys without
+        // the chain, which this build never reads.
         (arb_key, "schema", json!("bloom.pendle.operation.v1")),
     ];
     for (key, field, value) in cases {
@@ -807,6 +996,16 @@ fn market_list_reports_truncation() {
     let list = api::active_markets(&mut h, ETH).unwrap();
     assert_eq!(h.http_calls, api::MAX_MARKET_PAGES);
     assert_eq!((list.count, list.truncated), (api::MAX_MARKET_PAGES, true));
+
+    // Pages that repeat earlier rows add nothing, so they cannot complete the
+    // list, and paging stops at the first one.
+    for total in [3, 100] {
+        let repeated = || page(total, vec![listed(1, 1), listed(2, 1)]);
+        let mut h = with_pages([repeated(), repeated(), repeated()]);
+        let list = api::active_markets(&mut h, ETH).unwrap();
+        assert_eq!((list.count, list.truncated), (2, true), "{total}");
+        assert_eq!(h.http_calls, 2, "{total}");
+    }
 }
 #[test]
 fn market_list_keeps_native_token_entries() {

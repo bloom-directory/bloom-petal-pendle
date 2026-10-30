@@ -196,7 +196,6 @@ pub fn active_markets<H: Host>(host: &mut H, chain: Chain) -> Result<MarketList>
     let mut results = Vec::new();
     let mut total = 0;
     let mut skip = 0;
-    let mut complete = false;
     for _ in 0..MAX_MARKET_PAGES {
         let url = format!(
             "{API}/v2/markets/all?chainId={}&isActive=true&skip={skip}&limit={MARKET_PAGE}",
@@ -206,6 +205,7 @@ pub fn active_markets<H: Host>(host: &mut H, chain: Chain) -> Result<MarketList>
             .map_err(|_| "Pendle market list schema changed")?;
         total = page.total;
         let returned = page.results.len();
+        let before = results.len();
         for market in page.results {
             let market = summary(chain, market)?;
             if seen.insert(market.address.clone()) {
@@ -213,11 +213,9 @@ pub fn active_markets<H: Host>(host: &mut H, chain: Chain) -> Result<MarketList>
             }
         }
         skip += returned;
-        if skip >= total {
-            complete = true;
-            break;
-        }
-        if returned == 0 {
+        // Stop at the end, or when a page adds nothing new: an empty page, or
+        // Pendle repeating rows it already sent.
+        if skip >= total || results.len() == before {
             break;
         }
     }
@@ -226,7 +224,7 @@ pub fn active_markets<H: Host>(host: &mut H, chain: Chain) -> Result<MarketList>
         chain_id: chain.id(),
         total,
         count: results.len(),
-        truncated: !complete,
+        truncated: results.len() < total,
         results,
     })
 }

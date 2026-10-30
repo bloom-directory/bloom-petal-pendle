@@ -31,6 +31,9 @@ pub struct Draft {
     pub market: api::Market,
     pub input_token: String,
     pub output_token: String,
+    /// Read from the tokens onchain when the draft is made.
+    pub input_decimals: u8,
+    pub output_decimals: u8,
     pub expected_output: String,
     pub encoded_minimum: String,
     pub price_impact: f64,
@@ -165,9 +168,22 @@ pub fn create<H: Host>(
     let transaction: evm::Transaction = serde_json::from_value(route["tx"].clone())
         .map_err(|_| "quote transaction schema changed")?;
     let minimum = evm::validate_transaction(&transaction, &owner, op, &request, &market)?;
-    if minimum > amount(&expected_output)? {
+    let expected = amount(&expected_output)?;
+    if minimum > expected {
         return Err("quote minimum exceeds expected output".into());
     }
+    // Pendle encodes floor(expected × (10000 − slippage_bps) / 10000). A lower
+    // minimum allows more slippage than the intent asked for.
+    let floor = expected
+        .checked_mul(U256::from(10_000 - request.slippage_bps))
+        .ok_or("expected output is too large")?
+        / U256::from(10_000);
+    if minimum < floor {
+        return Err("quote minimum allows more slippage than slippage_bps".into());
+    }
+    // plan.md shows decimals, so they come from the tokens, not the API.
+    let input_decimals = evm::call(host, chain, address(&input_token)?, evm::decimalsCall {})?;
+    let output_decimals = evm::call(host, chain, address(&output_token)?, evm::decimalsCall {})?;
     let current_allowance = evm::call(
         host,
         chain,
@@ -213,6 +229,8 @@ pub fn create<H: Host>(
         market,
         input_token,
         output_token,
+        input_decimals,
+        output_decimals,
         expected_output,
         encoded_minimum: minimum.to_string(),
         price_impact: impact,
@@ -316,7 +334,12 @@ fn advance<H: Host>(
     if draft.steps[index].state == "staging_unknown" {
         return Err("staging outcome unknown; inspect the account outbox before recovery".into());
     }
-    if host.now_ms() > draft.expires_ms {
+    // An expired quote stages nothing new and requests no new owner approval.
+    // A step whose approval was already requested can still be broadcast, so
+    // a slow ceremony does not strand an approved outbox entry.
+    let approval_requested =
+        draft.steps[index].outbox_id.is_some() && draft.state == "approval_required";
+    if host.now_ms() > draft.expires_ms && !approval_requested {
         return Err("quote expired; reconcile prior steps and create a new reviewed intent".into());
     }
     // Recheck chain, factory membership, maturity and exact calldata on every write.
@@ -378,9 +401,25 @@ fn advance<H: Host>(
     }
 }
 
-/// Symbol and decimals of a token named by the market, so base units can be read.
-fn describe(market: &api::Market, token: &str) -> String {
-    [
+/// A Pendle API string made safe to print in plan.md: at most 64 characters,
+/// with no line breaks, parentheses or other markup.
+fn plain(value: &str) -> String {
+    value
+        .chars()
+        .take(64)
+        .map(|c| {
+            if c.is_alphanumeric() || " -_.:+/".contains(c) {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect()
+}
+/// A token's address, Pendle's symbol for it and its onchain decimals, so
+/// base units can be read.
+fn describe(market: &api::Market, token: &str, decimals: u8) -> String {
+    let symbol = [
         &market.pt,
         &market.yt,
         &market.sy,
@@ -391,15 +430,13 @@ fn describe(market: &api::Market, token: &str) -> String {
     .chain(&market.input_tokens)
     .chain(&market.output_tokens)
     .find(|t| t.address.eq_ignore_ascii_case(token))
-    .map_or_else(
-        || format!("{token} (not named by the market)"),
-        |t| format!("{token} ({}, {} decimals)", t.symbol, t.decimals),
-    )
+    .map_or_else(|| "not named by the market".into(), |t| plain(&t.symbol));
+    format!("{token} ({symbol}, {decimals} decimals)")
 }
 
 pub fn plan(draft: &Draft) -> String {
     format!(
-        "# Pendle {}\n\nWallet/account: {}/{}\nChain: {} ({})\nOwner/receiver: {}\nMarket: {}\nMaturity: {}\nInput token: {}\nInput base units: {}\nOutput token: {}\nExpected output base units (API estimate): {}\nMinimum output enforced in calldata: {}\nPrice impact (API estimate): {}\nQuote expires at: {} ms\nAccounting asset: {} ({})\nUnderlying asset: {} ({})\n\n{} outbox steps; each requires its own Bloom authorization. Inspect status.json, then write `confirm` to confirm.json to advance one step. A successful receipt is execution evidence, not an independent APY or redemption-value guarantee. Router: {}.\n",
+        "# Pendle {}\n\nWallet/account: {}/{}\nChain: {} ({})\nOwner/receiver: {}\nMarket: {}\nMaturity: {}\nInput token: {}\nInput base units: {}\nOutput token: {}\nExpected output base units (API estimate): {}\nMinimum output enforced in calldata: {}\nPrice impact (API estimate): {}\nQuote expires at: {} ms\nAccounting asset: {} ({})\nUnderlying asset: {} ({})\n\nThe input and output tokens are checked onchain, and their decimals are read from them. Symbols, the maturity date and the accounting and underlying assets are as Pendle reports them.\n\n{} outbox steps; each requires its own Bloom authorization. Inspect status.json, then write `confirm` to confirm.json to advance one step. A successful receipt is execution evidence, not an independent APY or redemption-value guarantee. Router: {}.\n",
         draft.operation.name(),
         draft.wallet,
         draft.account,
@@ -407,18 +444,18 @@ pub fn plan(draft: &Draft) -> String {
         draft.chain.id(),
         draft.owner,
         draft.request.market,
-        draft.market.expiry,
-        describe(&draft.market, &draft.input_token),
+        plain(&draft.market.expiry),
+        describe(&draft.market, &draft.input_token, draft.input_decimals),
         draft.request.amount,
-        describe(&draft.market, &draft.output_token),
+        describe(&draft.market, &draft.output_token, draft.output_decimals),
         draft.expected_output,
         draft.encoded_minimum,
         draft.price_impact,
         draft.expires_ms,
-        draft.market.accounting_asset.symbol,
-        draft.market.accounting_asset.address,
-        draft.market.underlying_asset.symbol,
-        draft.market.underlying_asset.address,
+        plain(&draft.market.accounting_asset.symbol),
+        plain(&draft.market.accounting_asset.address),
+        plain(&draft.market.underlying_asset.symbol),
+        plain(&draft.market.underlying_asset.address),
         draft.steps.len(),
         ROUTER
     )
