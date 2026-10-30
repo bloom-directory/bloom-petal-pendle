@@ -1,5 +1,7 @@
 //! Decode actual ABI bytes, never the API's descriptive contractParamInfo.
-use crate::{DraftInput, Operation, ROUTER, Result, address, amount, api::Market, host::Host};
+use crate::{
+    Chain, DraftInput, Operation, ROUTER, Result, address, amount, api::Market, host::Host,
+};
 use alloy::{
     primitives::{Address, Bytes, U256},
     sol,
@@ -29,6 +31,7 @@ sol! {
     function getTokensOut() external view returns (address[] tokens);
     function allowance(address owner, address spender) external view returns (uint256 value);
     function balanceOf(address owner) external view returns (uint256 value);
+    function decimals() external view returns (uint8 value);
     function approve(address spender, uint256 amount) external returns (bool);
 }
 
@@ -43,36 +46,85 @@ pub struct Transaction {
 fn zero() -> String {
     "0".into()
 }
-pub fn call<H: Host, C: SolCall>(host: &mut H, to: Address, call: C) -> Result<C::Return> {
-    let params = json!([{"to":format!("{to:#x}"),"data":format!("0x{}",hex::encode(call.abi_encode()))}, "latest"]);
-    let result = host.chain("eth_call", &params.to_string())?;
+fn rpc_string(result: &str) -> Result<String> {
     let value: serde_json::Value =
-        serde_json::from_str(&result).unwrap_or_else(|_| result.clone().into());
-    let bytes = value.as_str().ok_or("invalid eth_call response")?;
-    let bytes = hex::decode(bytes.strip_prefix("0x").ok_or("invalid eth_call hex")?)
+        serde_json::from_str(result).unwrap_or_else(|_| result.to_owned().into());
+    value
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "invalid chain read response".into())
+}
+pub fn call<H: Host, C: SolCall>(
+    host: &mut H,
+    chain: Chain,
+    to: Address,
+    call: C,
+) -> Result<C::Return> {
+    let params = json!([{"to":format!("{to:#x}"),"data":format!("0x{}",hex::encode(call.abi_encode()))}, "latest"]);
+    let result = rpc_string(&host.chain(chain, "eth_call", &params.to_string())?)?;
+    let bytes = hex::decode(result.strip_prefix("0x").ok_or("invalid eth_call hex")?)
         .map_err(|_| "invalid eth_call hex")?;
     C::abi_decode_returns(&bytes).map_err(|_| "contract returned invalid ABI bytes".into())
+}
+/// The chain id reported by the RPC that Bloom has configured for `chain`.
+pub fn chain_id<H: Host>(host: &mut H, chain: Chain) -> Result<u64> {
+    let result = rpc_string(&host.chain(chain, "eth_chainId", "[]")?)?;
+    u64::from_str_radix(
+        result.strip_prefix("0x").ok_or("invalid eth_chainId hex")?,
+        16,
+    )
+    .map_err(|_| "invalid eth_chainId hex".into())
+}
+/// Pendle's market factories (`marketFactory` and `marketFactoryV3` to `V6`),
+/// pinned from `deployments/<chain id>-core.json` in pendle-core-v2-public.
+pub fn factories(chain: Chain) -> [&'static str; 5] {
+    match chain {
+        Chain::Ethereum => [
+            "0x27b1dacd74688af24a64bd3c9c1b143118740784",
+            "0x1a6fcc85557bc4fb7b534ed835a03ef056552d52",
+            "0x3d75bd20c983edb5fd218a1b7e0024f1056c7a2f",
+            "0x6fcf753f2c67b83f7b09746bbc4fa0047b35d050",
+            "0x6d247b1c044fa1e22e6b04fa9f71baf99eb29a9f",
+        ],
+        Chain::Arbitrum => [
+            "0xf5a7de2d276dbda3eef1b62a9e718eff4d29ddc8",
+            "0x2fcb47b58350cd377f94d3821e7373df60bd9ced",
+            "0xd9f5e9589016da862d2abce980a5a5b99a94f3e8",
+            "0xd29e76c6f15ada0150d10a1d3f45accd2098283b",
+            "0x49f2f7002669e0e4425fa0203975625ab4af3143",
+        ],
+    }
 }
 
 pub fn verify_market<H: Host>(
     host: &mut H,
+    chain: Chain,
     market: &Market,
     operation: Operation,
     token: Address,
 ) -> Result<bool> {
+    if market.chain_id != chain.id() {
+        return Err(format!(
+            "market belongs to chain {}, not {}",
+            market.chain_id,
+            chain.name()
+        ));
+    }
+    // A Bloom chain pointed at the wrong network fails here, before any
+    // factory lookup could misreport it as an unauthenticated market.
+    if chain_id(host, chain)? != chain.id() {
+        return Err(format!(
+            "Bloom's {} RPC does not report chain id {}",
+            chain.name(),
+            chain.id()
+        ));
+    }
     let target = address(&market.address)?;
-    // Official Arbitrum factories, pinned from pendle-core-v2-public deployments.
-    let factories = [
-        "0xf5a7de2d276dbda3eef1b62a9e718eff4d29ddc8",
-        "0x2fcb47b58350cd377f94d3821e7373df60bd9ced",
-        "0xd9f5e9589016da862d2abce980a5a5b99a94f3e8",
-        "0xd29e76c6f15ada0150d10a1d3f45accd2098283b",
-        "0x49f2f7002669e0e4425fa0203975625ab4af3143",
-    ];
     let mut valid = false;
-    for factory in factories {
+    for factory in factories(chain) {
         if call(
             host,
+            chain,
             address(factory)?,
             isValidMarketCall { market: target },
         )
@@ -85,14 +137,14 @@ pub fn verify_market<H: Host>(
     if !valid {
         return Err("market is not authenticated by a supported Pendle factory".into());
     }
-    let tokens = call(host, target, readTokensCall {})?;
+    let tokens = call(host, chain, target, readTokensCall {})?;
     if tokens.sy != address(&market.sy.address)?
         || tokens.pt != address(&market.pt.address)?
         || tokens.yt != address(&market.yt.address)?
     {
         return Err("API token identities disagree with the on-chain market".into());
     }
-    let expiry = call(host, tokens.pt, expiryCall {})?;
+    let expiry = call(host, chain, tokens.pt, expiryCall {})?;
     let expired = expiry <= U256::from(host.now_ms() / 1000);
     match operation {
         Operation::BuyPt | Operation::SellPt if expired => {
@@ -105,9 +157,9 @@ pub fn verify_market<H: Host>(
     }
     if token != tokens.sy {
         let supported = if operation == Operation::BuyPt {
-            call(host, tokens.sy, getTokensInCall {})?
+            call(host, chain, tokens.sy, getTokensInCall {})?
         } else {
-            call(host, tokens.sy, getTokensOutCall {})?
+            call(host, chain, tokens.sy, getTokensOutCall {})?
         };
         if !supported.contains(&token) {
             return Err("asset is not natively supported by this market's SY; aggregator routes are disabled".into());

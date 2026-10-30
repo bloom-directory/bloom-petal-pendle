@@ -1,6 +1,6 @@
 # pendle operating contract
 
-Pendle V2 on Arbitrum. SDK and tooling are pinned to Petal commit
+Pendle V2 on Ethereum and Arbitrum. SDK and tooling are pinned to Petal commit
 `7dd2722db5de305dd63ca4ed03591f3ab82fa40b`, where PR #45 merged into `master`.
 Move every copy of the pin together: `route/Cargo.toml` (then
 `cargo update --manifest-path route/Cargo.toml -p bloom-petal-sdk`),
@@ -12,6 +12,22 @@ All account routes use adjacent `[wallet]/[index]` captures and
 `petal::wallet_account(ctx)`. There is no account-zero fallback or body-supplied
 sender/receiver. Keep route composition in `route/files/` and reusable ABI,
 HTTP, persistence and transaction logic in focused `route/src/` modules.
+
+Every route under `[chain]` resolves it with `route_chain` or `selected`, so an
+unsupported chain is refused even by static listings. The exception is the
+`[wallet]/$index.rs` listings, which stay `petal::account_listing!()` because
+Bloom lists the accounts itself. Every chain read, stage, confirm, inspect,
+Pendle URL and store key takes that `Chain`.
+`Chain::id()` is the trust anchor: a live `eth_chainId` read only confirms it.
+To add a chain:
+- add a `Chain` variant with Bloom's chain name and its id;
+- pin its factories in `evm::factories` from `marketFactory` and
+  `marketFactoryV3` onwards in Pendle's `deployments/<chain id>-core.json`, and
+  check the router address there;
+- allow its `/core/v1/<id>/markets/*` and `/core/v3/sdk/<id>/convert` paths in
+  `petal.toml`;
+- record a market and quote fixture from the public API, and add an entry to
+  `CHAINS` in `scripts/triad-acceptance.py`.
 
 Decode actual calldata, enforce exact inputs and minimum outputs, and refuse
 unknown selectors, aggregator callbacks, embedded limit orders and native-token
