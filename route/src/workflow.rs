@@ -15,6 +15,15 @@ pub struct Step {
     pub state: String,
     pub outbox_id: Option<String>,
     pub tx_hash: Option<String>,
+    /// The owner approval Bloom asked for when this step was last confirmed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<Approval>,
+}
+/// Bloom's pending owner approval: its action id and when it expires.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Approval {
+    pub action_id: String,
+    pub expires_ms: u64,
 }
 pub const SCHEMA: &str = "bloom.pendle.operation.v2";
 
@@ -201,6 +210,7 @@ pub fn create<H: Host>(
             state: "prepared".into(),
             outbox_id: None,
             tx_hash: None,
+            approval: None,
         })
     };
     if current_allowance < amount(&request.amount)? {
@@ -258,12 +268,20 @@ pub fn reconcile<H: Host>(
         let Some(id) = &step.outbox_id else {
             continue;
         };
-        if matches!(step.state.as_str(), "confirmed" | "reverted") {
+        if matches!(step.state.as_str(), "confirmed" | "reverted" | "failed") {
             continue;
         }
         let observed = host.inspect(account.wallet(), chain, id)?;
         step.tx_hash = observed.tx_hash;
-        if let Some(receipt) = observed.receipt_json {
+        // Bloom reports `failed` for an entry it refused or let expire and
+        // `cancelled` for one the owner cancelled. Without a transaction hash
+        // nothing was broadcast, and Bloom will never send it.
+        if step.tx_hash.is_none()
+            && observed.receipt_json.is_none()
+            && matches!(observed.state.as_str(), "failed" | "cancelled")
+        {
+            step.state = "failed".into();
+        } else if let Some(receipt) = observed.receipt_json {
             let receipt: Value =
                 serde_json::from_str(&receipt).map_err(|_| "invalid outbox receipt")?;
             // Bloom's normalized receipt records its outcome explicitly.
@@ -281,6 +299,8 @@ pub fn reconcile<H: Host>(
     }
     if draft.steps.iter().any(|s| s.state == "reverted") {
         draft.state = "reverted".into();
+    } else if draft.steps.iter().any(|s| s.state == "failed") {
+        draft.state = "failed".into();
     } else if draft.steps.iter().all(|s| s.state == "confirmed") {
         // A successful receipt proves execution; independent protocol/venue
         // output accounting is deliberately not inferred from an API quote.
@@ -323,6 +343,12 @@ fn advance<H: Host>(
             "operation requires reconciliation or manual recovery; it cannot be resubmitted".into(),
         );
     }
+    if draft.state == "failed" {
+        return Err(
+            "Bloom refused, cancelled or expired an outbox step before broadcast; reconcile prior steps and create a new reviewed intent"
+                .into(),
+        );
+    }
     let index = draft
         .steps
         .iter()
@@ -356,16 +382,38 @@ fn advance<H: Host>(
         .ok_or("execution step missing")?
         .transaction;
     evm::validate_transaction(execution, &draft.owner, op, &draft.request, &draft.market)?;
+    // Approval steps are rebuilt from the intent rather than trusted from the
+    // store: the token being spent, the router, and zero or the exact input.
+    if index + 1 < draft.steps.len() {
+        let value = match draft.steps[index].kind.as_str() {
+            "reset_allowance" => U256::ZERO,
+            "approve_input" => amount(&draft.request.amount)?,
+            _ => return Err("unexpected step before the Pendle execution".into()),
+        };
+        let token = if op == Operation::BuyPt {
+            &draft.request.token
+        } else {
+            &draft.market.pt.address
+        };
+        if draft.steps[index].transaction != evm::approval(token, &draft.owner, value) {
+            return Err("approval step does not match the reviewed intent".into());
+        }
+    }
     if let Some(outbox_id) = draft.steps[index].outbox_id.clone() {
         // tx_confirm retains the exact existing outbox id across ceremonies.
         match host.confirm(account.wallet(), chain, &outbox_id) {
             Ok(outcome) => {
                 // ApprovalPending is a successful host response, not a
                 // broadcast. Keep the same step confirmable after ceremony.
-                if outcome.approval.is_some() {
+                if let Some(approval) = outcome.approval {
+                    draft.steps[index].approval = Some(Approval {
+                        action_id: approval.action_id,
+                        expires_ms: approval.expires_ms,
+                    });
                     draft.steps[index].state = "staged".into();
                     draft.state = "approval_required".into();
                 } else {
+                    draft.steps[index].approval = None;
                     draft.steps[index].state = "submitted".into();
                     draft.state = "submitted".into();
                 }

@@ -217,7 +217,7 @@ def main():
                     assert receipt["status"] == "0x1" and receipt["from"].lower() == owner
                     report["transactions"].append({"operation": op, "step": step["kind"], "hash": step["tx_hash"], "receipt_status": receipt["status"]})
                 return observed
-            assert observed["state"] not in ("reverted", "staging_unknown"), observed["state"]
+            assert observed["state"] not in ("reverted", "staging_unknown", "failed"), observed["state"]
             result = write(base + "/confirm.json", "confirm", check=False)
             observed = json.loads(read(base + "/status.json"))
             for step in observed["steps"]:

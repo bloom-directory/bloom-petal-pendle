@@ -90,7 +90,9 @@ one floor that doesn't come from Pendle: set it yourself. Quotes are
 requested with Pendle's limit-order fills turned off. It refuses external
 aggregators, limit-order fills, native assets, unsupported selectors and
 noncanonical/trailing calldata. Every `confirm` repeats the chain, factory,
-maturity and calldata checks before staging.
+maturity and calldata checks before staging, and rebuilds each approval step
+from the intent: the token being spent, the router, and zero or the exact
+input.
 
 The wallet's policy must allow each transaction's target on that chain: the
 Pendle router, the input token for a buy's approval, and the PT for a sell's
@@ -101,15 +103,30 @@ The plan contains exact-amount token approval steps only when allowance is
 insufficient. A nonzero insufficient allowance is reset first. Each write to
 `confirm.json` advances one step through Bloom's outbox. Complete the owner
 approval shown by Bloom, then retry the same path. Status exposes the outbox
-IDs so the owner can inspect pending approvals in the selected account.
+IDs so the owner can inspect pending approvals in the selected account. When
+Bloom asks for an approval, the step's `approval` gives its action id and
+expiry. The wallet policy must list this package's hash in
+`allowed_petal_packages`; after an install that changes the hash, the first
+`confirm` asks the owner to approve adding it, under
+`/wallets/<wallet>/policy-updates/pending/<action_id>/`. A transaction
+approval is in the step's outbox entry.
+
+If Bloom reports a step `failed` or `cancelled` with no transaction hash
+(refused by policy, expired, or cancelled by the owner), nothing was broadcast
+for it and Bloom never will. The step and the operation become `failed`, and
+`confirm` refuses it: reconcile earlier steps and create a new intent. Bloom
+0.4.1 still reports an expired entry as `pending`, so status keeps waiting on
+it until Bloom records the failure.
 `plan.md` reads the input and output decimals from the tokens onchain. Token
 symbols and the maturity date are Pendle's, printed without line breaks or
 markup.
 
-Quotes expire after five minutes. After that, `confirm` stages nothing new and
-requests no new owner approval. It still broadcasts a step whose approval was
-already requested, so a ceremony that outlasts the quote doesn't leave an
-approved entry stuck in the outbox. Expiry does not cancel a submitted
+Quotes expire after five minutes. After that, `confirm` stages nothing new
+and starts no approval for a step that hasn't asked for one. A step whose
+approval was already requested can still be confirmed and broadcast, so a
+ceremony that outlasts the quote doesn't leave an approved entry stuck in the
+outbox. If that ceremony lapsed, Bloom may open a fresh one for the same
+entry. Expiry does not cancel a submitted
 transaction or revoke an allowance. Reconcile previous steps before creating
 a fresh intent. Lost stage replies are `staging_unknown` and never restaged.
 A persisted writer lock after a crash requires operator inspection; locks are

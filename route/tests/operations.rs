@@ -94,6 +94,8 @@ struct Fake {
     approved: bool,
     /// Outbox ids that were broadcast; only these have receipts.
     mined: BTreeSet<String>,
+    /// What Bloom reports for an unmined entry: its state and any hash.
+    outbox: BTreeMap<String, (String, Option<String>)>,
 }
 impl Default for Fake {
     fn default() -> Self {
@@ -120,6 +122,7 @@ impl Default for Fake {
             lose_stage: false,
             approved: false,
             mined: BTreeSet::new(),
+            outbox: BTreeMap::new(),
         }
     }
 }
@@ -282,6 +285,14 @@ impl Host for Fake {
     fn inspect(&mut self, _wallet: &str, chain: Chain, id: &str) -> Result<OutboxInspection> {
         self.inspects.push(chain);
         let mined = self.mined.contains(id);
+        if let (false, Some((state, tx_hash))) = (mined, self.outbox.get(id)) {
+            return Ok(OutboxInspection {
+                outbox_id: id.into(),
+                state: state.clone(),
+                tx_hash: tx_hash.clone(),
+                receipt_json: None,
+            });
+        }
         Ok(OutboxInspection {
             outbox_id: id.into(),
             state: if mined { "success" } else { "staged" }.into(),
@@ -1124,4 +1135,130 @@ fn rest_reads_preserve_http_failure_and_bound_response_size() {
         api::http_json(&mut host, "GET", format!("{API}/v2/markets/all"), None).unwrap_err(),
         "Pendle response is too large"
     );
+}
+#[test]
+fn entries_bloom_failed_or_cancelled_end_the_operation() {
+    for state in ["failed", "cancelled"] {
+        let mut h = Fake::default();
+        workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+        h.outbox.insert("1-tx".into(), (state.into(), None));
+        let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+        assert_eq!(
+            (d.state.as_str(), d.steps[0].state.as_str()),
+            ("failed", "failed")
+        );
+        let confirms = h.confirms.len();
+        assert_eq!(
+            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+            "Bloom refused, cancelled or expired an outbox step before broadcast; reconcile prior steps and create a new reviewed intent"
+        );
+        // Nothing is confirmed again and nothing new is staged.
+        assert_eq!((h.confirms.len(), h.staged.len()), (confirms, 1));
+    }
+    // With a transaction hash it may have been broadcast: keep waiting.
+    let mut h = Fake::default();
+    workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    h.outbox
+        .insert("1-tx".into(), ("failed".into(), Some("0xdef".into())));
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(d.steps[0].state, "submitted");
+    assert_ne!(d.state, "failed");
+}
+#[test]
+fn status_names_the_pending_owner_approval() {
+    let mut h = Fake::default();
+    workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(
+        d.steps[0].approval,
+        Some(workflow::Approval {
+            action_id: "pending-action".into(),
+            expires_ms: h.now + 60_000,
+        })
+    );
+    let shown = serde_json::to_value(&d).unwrap();
+    assert_eq!(shown["steps"][0]["approval"]["action_id"], "pending-action");
+    assert!(shown["steps"][1].get("approval").is_none());
+    h.approved = true;
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(d.steps[0].approval, None);
+}
+#[test]
+fn tampered_approval_steps_are_refused() {
+    let mut h = Fake {
+        allowance: U256::from(1),
+        ..Fake::default()
+    };
+    workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
+    let key = "operations/arbitrum/buy-pt/one.json";
+    let original: Value = serde_json::from_slice(&h.store[key]).unwrap();
+    let unlimited = format!(
+        "0x{}",
+        hex::encode(
+            approveCall {
+                spender: address(ROUTER).unwrap(),
+                amount: U256::MAX
+            }
+            .abi_encode()
+        )
+    );
+    let cases: [(usize, &str, Value, &str); 4] = [
+        // An unlimited approval in place of the exact input.
+        (
+            1,
+            "data",
+            json!(unlimited),
+            "approval step does not match the reviewed intent",
+        ),
+        // The same approval aimed at another token.
+        (
+            1,
+            "to",
+            json!(market().pt.address),
+            "approval step does not match the reviewed intent",
+        ),
+        // A nonzero reset.
+        (
+            0,
+            "data",
+            original["steps"][1]["transaction"]["data"].clone(),
+            "approval step does not match the reviewed intent",
+        ),
+        // A step kind this Petal never builds.
+        (
+            0,
+            "kind",
+            json!("transfer"),
+            "unexpected step before the Pendle execution",
+        ),
+    ];
+    for (index, field, value, error) in cases {
+        let mut record = original.clone();
+        if field == "kind" {
+            record["steps"][index][field] = value;
+        } else {
+            record["steps"][index]["transaction"][field] = value;
+        }
+        h.store
+            .insert(key.into(), serde_json::to_vec(&record).unwrap());
+        // Each tampered step is refused when it would be staged.
+        if index == 1 {
+            let mut done = record.clone();
+            done["steps"][0]["state"] = json!("confirmed");
+            h.store
+                .insert(key.into(), serde_json::to_vec(&done).unwrap());
+        }
+        assert_eq!(
+            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").err(),
+            Some(error.to_string()),
+            "{index} {field}"
+        );
+        assert!(h.staged.is_empty());
+    }
 }

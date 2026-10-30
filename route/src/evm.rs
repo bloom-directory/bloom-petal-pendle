@@ -35,7 +35,7 @@ sol! {
     function approve(address spender, uint256 amount) external returns (bool);
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transaction {
     pub to: String,
     pub data: String,
