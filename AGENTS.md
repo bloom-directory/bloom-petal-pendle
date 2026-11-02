@@ -5,8 +5,8 @@ Pendle V2 on Ethereum and Arbitrum. SDK and tooling are pinned to Petal commit
 Move every copy of the pin together: `route/Cargo.toml` (then
 `cargo update --manifest-path route/Cargo.toml -p bloom-petal-sdk`),
 `petal-build.toml`, `scripts/build.sh`, `SDK_REV` in `route/src/lib.rs`, the
-report in `scripts/triad-acceptance.py`, the development skill below, and the
-README.
+report in `scripts/triad-acceptance.py`, the CLI install in
+`.github/workflows/ci.yml`, the development skill below, and the README.
 
 All account routes use adjacent `[wallet]/[index]` captures and
 `petal::wallet_account(ctx)`. There is no account-zero fallback or body-supplied

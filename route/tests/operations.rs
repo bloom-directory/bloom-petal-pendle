@@ -105,6 +105,11 @@ struct Fake {
     approval_action: String,
     /// Fail the next confirm with a host error.
     fail_confirm: bool,
+    /// Return an unmined entry with the same target, value and calldata
+    /// instead of staging another, as Bloom does for one route.
+    dedupe: bool,
+    /// A VFS path whose read fails.
+    unreadable: Option<String>,
 }
 impl Default for Fake {
     fn default() -> Self {
@@ -136,6 +141,8 @@ impl Default for Fake {
             files: BTreeMap::new(),
             approval_action: "pending-action".into(),
             fail_confirm: false,
+            dedupe: false,
+            unreadable: None,
         }
     }
 }
@@ -149,9 +156,12 @@ impl Fake {
         self.market = eth_market();
         self.quote = eth_quote();
     }
-    /// Bloom moves an entry to `failed/` and reports `state` for it.
+    /// Bloom moves an entry from `pending/` to `failed/` and reports `state`
+    /// for it.
     fn fail_entry(&mut self, chain: Chain, id: &str, state: &str) {
         self.outbox.insert(id.into(), (state.into(), None));
+        self.files
+            .remove(&outbox_path(chain, "pending", id, "intent.json"));
         self.files.insert(
             outbox_path(chain, "failed", id, "intent.json"),
             json!({"action_id": "pending-action", "status": state})
@@ -196,6 +206,9 @@ impl Host for Fake {
         Ok(OWNER.as_bytes().to_vec())
     }
     fn vfs_file(&mut self, path: &str, max: usize) -> Result<Option<Vec<u8>>> {
+        if self.unreadable.as_deref() == Some(path) {
+            return Err("outbox entry read failed".into());
+        }
         Ok(self.files.get(path).map(|bytes| {
             if bytes.len() > max {
                 vec![]
@@ -292,6 +305,20 @@ impl Host for Fake {
         Ok(())
     }
     fn stage(&mut self, tx: &EvmTransaction) -> Result<StagedTransaction> {
+        if self.dedupe {
+            let pending = self.staged.iter().enumerate().find(|(i, old)| {
+                !self.mined.contains(&format!("{}-tx", i + 1))
+                    && (&old.to, &old.value_wei, &old.data_hex)
+                        == (&tx.to, &tx.value_wei, &tx.data_hex)
+            });
+            if let Some((i, _)) = pending {
+                return Ok(StagedTransaction {
+                    outbox_id: format!("{}-tx", i + 1),
+                    plan_md: "existing entry".into(),
+                    approval: None,
+                });
+            }
+        }
         self.staged.push(tx.clone());
         if self.lose_stage {
             return Err("lost reply".into());
@@ -834,10 +861,13 @@ fn ethereum_draft_uses_chain_one_end_to_end() {
     assert!(!h.confirms.is_empty() && h.confirms.iter().all(|c| *c == ETH));
     assert!(!h.inspects.is_empty() && h.inspects.iter().all(|c| *c == ETH));
     assert!(h.reads.iter().all(|(chain, _)| *chain == ETH));
-    assert!(
+    // Each outbox entry is claimed under its chain.
+    assert_eq!(
         h.store
             .keys()
-            .all(|k| k.starts_with("operations/ethereum/buy-pt/"))
+            .filter(|k| !k.starts_with("operations/ethereum/buy-pt/"))
+            .collect::<Vec<_>>(),
+        ["outbox-claims/ethereum/1-tx", "outbox-claims/ethereum/2-tx"]
     );
 }
 #[test]
@@ -1216,7 +1246,10 @@ const TAMPERED: &str = "operation steps do not match the reviewed intent";
 
 #[test]
 fn entries_bloom_never_sent_end_the_operation() {
-    for state in ["failed", "cancelled"] {
+    // Bloom 0.4.1 leaves `pending` in the intent of an entry it expired,
+    // refused under policy or cancelled before sending; later Bloom records
+    // why it left the queue.
+    for state in ["pending", "failed", "cancelled"] {
         let mut h = Fake::default();
         staged_with_approval(&mut h);
         h.fail_entry(ARB, "1-tx", state);
@@ -1247,45 +1280,123 @@ fn entries_bloom_never_sent_end_the_operation() {
 }
 #[test]
 fn entries_bloom_may_have_broadcast_are_never_abandoned() {
-    let cases: [(&str, Option<&str>); 4] = [
+    // A file in `failed/`, then the step's hash and its cancel's hash.
+    let cases: [(&str, Option<&str>, Option<&str>); 5] = [
         // A lost submit reply leaves the hash only in Bloom's marker.
-        ("broadcast_attempted.json", Some("0xfeed")),
-        ("replacement_broadcast_attempted.json", None),
-        ("cancel_broadcast_attempted.json", None),
+        ("broadcast_attempted.json", Some("0xfeed"), None),
+        ("replacement_broadcast_attempted.json", None, None),
+        ("cancel_broadcast_attempted.json", None, Some("0xfeed")),
+        ("cancel_tx_hash", None, Some("0xfeed")),
         // Bloom reports it cancelled, but it is not where discarded entries go.
-        ("", None),
+        ("", None, None),
     ];
-    for (marker, hash) in cases {
+    for status in ["pending", "cancelled"] {
+        for (file, hash, cancel) in cases {
+            let case = format!("{status} {file}");
+            let mut h = Fake::default();
+            staged_with_approval(&mut h);
+            h.fail_entry(ARB, "1-tx", status);
+            match file {
+                "" => {
+                    h.files
+                        .remove(&outbox_path(ARB, "failed", "1-tx", "intent.json"));
+                    h.outbox.insert("1-tx".into(), ("cancelled".into(), None));
+                }
+                // Bloom writes the cancel's hash as bare text.
+                "cancel_tx_hash" => {
+                    h.files
+                        .insert(outbox_path(ARB, "failed", "1-tx", file), b"0xfeed".to_vec());
+                }
+                _ => {
+                    h.files.insert(
+                        outbox_path(ARB, "failed", "1-tx", file),
+                        json!({"tx_hash": "0xfeed"}).to_string().into_bytes(),
+                    );
+                }
+            }
+            let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+            assert_eq!(
+                (d.state.as_str(), d.steps[0].state.as_str()),
+                ("broadcast_unknown", "broadcast_unknown"),
+                "{case}"
+            );
+            assert_eq!(d.steps[0].tx_hash.as_deref(), hash, "{case}");
+            assert_eq!(d.steps[0].cancel_tx_hash.as_deref(), cancel, "{case}");
+            assert_eq!(d.steps[0].approval, None, "{case}");
+            let confirms = h.confirms.len();
+            assert_eq!(
+                workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+                MAYBE_SENT,
+                "{case}"
+            );
+            assert_eq!((h.confirms.len(), h.staged.len()), (confirms, 1), "{case}");
+        }
+    }
+}
+#[test]
+fn a_cancelled_send_may_still_have_mined() {
+    // Bloom 0.4.1 moves a sent entry it cancels to `failed/`, keeps its
+    // status and hash, and never looks for a receipt for either again.
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.outbox
+        .insert("1-tx".into(), ("sent".into(), Some("0xorig".into())));
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(d.steps[0].state, "submitted");
+    h.files
+        .remove(&outbox_path(ARB, "pending", "1-tx", "intent.json"));
+    for (file, hash) in [
+        ("intent.json", "0xorig"),
+        ("broadcast_attempted.json", "0xorig"),
+        ("cancel_broadcast_attempted.json", "0xcancel"),
+    ] {
+        h.files.insert(
+            outbox_path(ARB, "failed", "1-tx", file),
+            json!({"action_id": "pending-action", "status": "sent", "tx_hash": hash})
+                .to_string()
+                .into_bytes(),
+        );
+    }
+    h.files.insert(
+        outbox_path(ARB, "failed", "1-tx", "cancel_tx_hash"),
+        b"0xcancel".to_vec(),
+    );
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(
+        (d.state.as_str(), d.steps[0].state.as_str()),
+        ("broadcast_unknown", "broadcast_unknown")
+    );
+    let shown = serde_json::to_value(&d).unwrap();
+    assert_eq!(shown["steps"][0]["tx_hash"], "0xorig");
+    assert_eq!(shown["steps"][0]["cancel_tx_hash"], "0xcancel");
+    assert!(shown["steps"][1].get("cancel_tx_hash").is_none());
+    let confirms = h.confirms.len();
+    assert_eq!(
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        MAYBE_SENT
+    );
+    assert_eq!((h.confirms.len(), h.staged.len()), (confirms, 1));
+}
+#[test]
+fn an_unreadable_outbox_entry_is_an_error_not_a_guess() {
+    for file in ["intent.json", "broadcast_attempted.json", "cancel_tx_hash"] {
         let mut h = Fake::default();
         staged_with_approval(&mut h);
-        h.fail_entry(ARB, "1-tx", "cancelled");
-        if marker.is_empty() {
-            h.files
-                .remove(&outbox_path(ARB, "failed", "1-tx", "intent.json"));
-        } else {
-            h.files.insert(
-                outbox_path(ARB, "failed", "1-tx", marker),
-                json!({"tx_hash": "0xfeed"}).to_string().into_bytes(),
-            );
-        }
-        let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+        h.fail_entry(ARB, "1-tx", "pending");
+        h.unreadable = Some(outbox_path(ARB, "failed", "1-tx", file));
         assert_eq!(
-            (d.state.as_str(), d.steps[0].state.as_str()),
-            ("broadcast_unknown", "broadcast_unknown"),
-            "{marker}"
+            workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap_err(),
+            "outbox entry read failed",
+            "{file}"
         );
-        assert_eq!(d.steps[0].tx_hash.as_deref(), hash, "{marker}");
         let confirms = h.confirms.len();
-        assert_eq!(
-            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
-            MAYBE_SENT,
-            "{marker}"
-        );
-        assert_eq!((h.confirms.len(), h.staged.len()), (confirms, 1));
+        assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+        assert_eq!((h.confirms.len(), h.staged.len()), (confirms, 1), "{file}");
     }
 }
 #[test]
 fn a_mined_cancel_receipt_fails_the_step() {
+    // Bloom after 0.4.1 records `cancelled` once the same-nonce cancel mines.
     let mut h = Fake::default();
     staged_with_approval(&mut h);
     h.receipts.insert(
@@ -1327,6 +1438,20 @@ fn status_names_the_pending_owner_approval() {
     staged_with_approval(&mut h);
     let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
     assert_eq!(d.steps[0].approval.as_ref().unwrap().kind, "wallet_policy");
+    // Without the entry's intent, the approval cannot be told apart.
+    let mut h = Fake::default();
+    workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    h.files
+        .remove(&outbox_path(ARB, "pending", "1-tx", "intent.json"));
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(d.steps[0].approval.as_ref().unwrap().kind, "unknown");
+    h.now += 300_001;
+    assert_eq!(
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        EXPIRED
+    );
 }
 #[test]
 fn only_a_requested_transaction_approval_outlives_the_quote() {
@@ -1426,11 +1551,17 @@ fn tampered_operation_steps_are_refused() {
     nonzero_reset["transaction"]["data"] = approve["transaction"]["data"].clone();
     let mut renamed = reset.clone();
     renamed["kind"] = json!("transfer");
+    let mut renamed_execution = execute.clone();
+    renamed_execution["kind"] = json!("approve_input");
     let cases = [
         ("unlimited approval", vec![reset, &unlimited_step, execute]),
         ("another token", vec![reset, &other_token, execute]),
         ("nonzero reset", vec![&nonzero_reset, approve, execute]),
         ("unknown kind", vec![&renamed, approve, execute]),
+        (
+            "renamed execution",
+            vec![reset, approve, &renamed_execution],
+        ),
         ("reordered", vec![approve, reset, execute]),
         ("duplicated approval", vec![approve, approve, execute]),
         ("extra approval", vec![reset, approve, approve, execute]),
@@ -1536,5 +1667,116 @@ fn approval_steps_rebuild_for_every_operation() {
             address(&h.staged[steps - 1].to).unwrap(),
             address(ROUTER).unwrap()
         );
+    }
+}
+#[test]
+fn two_operations_never_share_an_outbox_entry() {
+    // Two drafts of the same intent get the same calldata, and Bloom hands a
+    // second stage of it the first one's pending entry.
+    let mut h = Fake {
+        dedupe: true,
+        ..Fake::default()
+    };
+    for id in ["one", "two"] {
+        workflow::create(&mut h, ARB, &account(), BUY, id, &body()).unwrap();
+    }
+    let confirm =
+        |h: &mut Fake, id: &str| workflow::confirm(h, ARB, &account(), BUY, id, b"confirm");
+    let status = |h: &mut Fake, id: &str| workflow::reconcile(h, ARB, &account(), BUY, id).unwrap();
+    confirm(&mut h, "one").unwrap();
+    assert_eq!(
+        confirm(&mut h, "two").unwrap_err(),
+        "Bloom returned pending outbox entry 1-tx of operation buy-pt/one/0; confirm or cancel that step first, then confirm this one again"
+    );
+    let two = status(&mut h, "two");
+    assert_eq!(
+        (
+            two.state.as_str(),
+            two.steps[0].state.as_str(),
+            &two.steps[0].outbox_id
+        ),
+        ("prepared", "prepared", &None)
+    );
+    // Once "one" sends its approval, "two" stages and sends its own.
+    h.approved = true;
+    confirm(&mut h, "one").unwrap();
+    confirm(&mut h, "two").unwrap();
+    assert_eq!(
+        status(&mut h, "two").steps[0].outbox_id.as_deref(),
+        Some("2-tx")
+    );
+    confirm(&mut h, "one").unwrap();
+    confirm(&mut h, "two").unwrap();
+    // The same for the swap.
+    assert_eq!(
+        confirm(&mut h, "two").unwrap_err(),
+        "Bloom returned pending outbox entry 3-tx of operation buy-pt/one/1; confirm or cancel that step first, then confirm this one again"
+    );
+    confirm(&mut h, "one").unwrap();
+    confirm(&mut h, "two").unwrap();
+    confirm(&mut h, "two").unwrap();
+    let (one, two) = (status(&mut h, "one"), status(&mut h, "two"));
+    assert_eq!(
+        (one.state.as_str(), two.state.as_str()),
+        ("execution_confirmed", "execution_confirmed")
+    );
+    let ids = |d: &workflow::Draft| {
+        d.steps
+            .iter()
+            .map(|s| s.outbox_id.clone().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        (ids(&one), ids(&two)),
+        (
+            vec!["1-tx".into(), "3-tx".into()],
+            vec!["2-tx".into(), "4-tx".into()]
+        )
+    );
+    assert_eq!(h.mined.len(), 4);
+}
+#[test]
+fn the_operation_state_follows_its_steps() {
+    let state = |h: &mut Fake| {
+        workflow::reconcile(h, ARB, &account(), BUY, "one")
+            .unwrap()
+            .state
+    };
+    let mut h = Fake::default();
+    workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
+    assert_eq!(state(&mut h), "prepared");
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    assert_eq!(state(&mut h), "staged");
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    assert_eq!(state(&mut h), "approval_required");
+    h.approved = true;
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    // The approval mined and nothing is in flight: the swap is next.
+    assert_eq!(state(&mut h), "prepared");
+    h.now += 300_001;
+    assert_eq!(state(&mut h), "expired");
+    assert_eq!(
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        EXPIRED
+    );
+
+    // A staged step with no transaction approval stops with the quote; one
+    // whose transaction approval Bloom requested does not.
+    let mut h = Fake::default();
+    workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    h.now += 300_001;
+    assert_eq!(state(&mut h), "expired");
+    for (action, expired) in [
+        ("pending-action", "approval_required"),
+        ("policy-update", "expired"),
+    ] {
+        let mut h = Fake {
+            approval_action: action.into(),
+            ..Fake::default()
+        };
+        staged_with_approval(&mut h);
+        h.now += 300_001;
+        assert_eq!(state(&mut h), expired, "{action}");
     }
 }
