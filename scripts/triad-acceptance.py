@@ -240,7 +240,10 @@ def main():
                     value = json.loads(challenge.stdout)
                     if value.get("ceremony_url"):
                         complete(value["ceremony_url"])
-            if result.returncode and observed["state"] not in ("approval_required", "submitted"):
+            # A step still in flight refuses confirm, and may have mined
+            # before the status read that follows.
+            in_flight = "transaction submitted; poll status before advancing" in result.stderr
+            if result.returncode and not in_flight and observed["state"] not in ("approval_required", "submitted"):
                 raise RuntimeError(result.stderr[-1800:])
             time.sleep(0.3)
         raise RuntimeError(op + " timed out")
