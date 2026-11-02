@@ -110,24 +110,36 @@ when the next `confirm` stages or sends a step, `approval_required` while an
 owner approval is pending, `submitted` while a transaction is in flight and
 `expired` once the quote has expired and no step can continue.
 
-Bloom returns an existing pending outbox entry, instead of staging another,
-for the same route, sender, target, value and calldata, and Pendle quotes the
-same calldata for two drafts of the same intent. So each operation claims the
-entries it stages. When Bloom returns an entry another operation holds,
-`confirm` stages nothing for this one and names that operation: confirm or
-cancel its step, then confirm this one again.
+While an outbox entry is pending, Bloom returns it instead of staging
+another for the same package, route, sender, target, value and calldata.
+Two drafts of the same intent, approvals of the same token and amount, and
+every allowance reset have the same calldata. So each operation claims the
+entries it stages, by outbox id and creation time, since ids repeat after
+Bloom restarts. When Bloom returns an entry another operation holds,
+`confirm` stages nothing for this one and names that operation and the
+entry: finish that operation, or discard the entry by writing `cancel` to
+its `confirm` file, then confirm this one again.
+
+Operations that spend the same token share the router's allowance, and one
+exact approval replaces another, so run them one at a time. `confirm` refuses
+to stage or send a Pendle transaction the allowance cannot cover, which would
+revert: create a new intent instead.
 
 When Bloom asks for an approval, the step's `approval` gives its action id,
 expiry and `kind`. A `transaction` approval is in the step's outbox entry. It
 is `unknown` when the Petal cannot read the entry's intent. A
 `wallet_policy` approval adds this package to the wallet policy, which must
 list the package hash in `allowed_petal_packages`. After an install that
-changes the hash, the first `confirm` of a staged step asks for it, under
-`/wallets/<wallet>/policy-updates/pending/<action_id>/`. Staging does not.
+changes the hash, the first `confirm` of a step staged after it asks for
+it, under `/wallets/<wallet>/policy-updates/pending/<action_id>/`. Staging
+does not. Bloom lets only the build that staged an entry inspect or confirm
+it, so finish operations before installing another build, or reinstall the
+build that staged them.
 
-Bloom 0.4.1 moves an entry it expires, refuses under policy or cancels to
-`outbox/failed/` and keeps reporting the status it had, so the Petal checks
-that directory on every read instead of trusting the status. An entry there
+Bloom 0.4.1 moves an entry it expires or refuses under policy, and a send it
+cancels, to `outbox/failed/` and keeps reporting the status it had, so the
+Petal checks that directory on every read instead of trusting the status. An
+unsent entry that is cancelled reports `cancelled`. An entry there
 with no transaction hash, no broadcast marker and no cancel was never sent:
 the step and the operation become `failed` and `confirm` refuses it.
 Reconcile earlier steps, whose approvals stay granted to the router, and
@@ -140,21 +152,32 @@ transaction's hash and its cancel's (`cancel_tx_hash`) when Bloom recorded
 them, and `confirm` refuses it. Check both on chain before creating a new
 intent: Bloom 0.4.1 never looks for a receipt for an entry in `failed/`, so
 even a cancelled send may have mined. Later Bloom keeps a cancelled send in
-its sent queue until one of the two mines, and a mined cancel makes the step
-`failed`.
+its sent queue, and the step `submitted`, until one of the two mines; a mined
+cancel makes the step `failed`. An entry later Bloom reports
+`signing_unknown`, released by an older Bloom although it may have been
+signed, is `broadcast_unknown`.
+
+A lost submit reply can also leave the broadcast marker in a pending entry.
+The step stays `staged`, showing the marker's hash, and never `expired`:
+the next `confirm` lets Bloom settle that attempt.
 
 `plan.md` reads the input and output decimals from the tokens onchain. Token
 symbols and the maturity date are Pendle's, printed without line breaks or
 markup.
 
 Quotes expire after five minutes. After that, `confirm` stages nothing new,
-and only a step whose transaction approval Bloom already requested can
-continue, so a ceremony that outlasts the quote doesn't leave an approved
-entry stuck in the outbox. If that ceremony lapsed, Bloom may open a fresh one
-for the same entry. A step that has only asked for the wallet-policy approval
-stops with the quote, and status shows `expired`. Expiry does not cancel a
-submitted transaction or revoke an allowance. Reconcile previous steps before creating
-a fresh intent. Lost stage replies are `staging_unknown` and never restaged.
+and only a step whose transaction approval Bloom already requested, or that
+Bloom may already have sent, can continue, so a ceremony that outlasts the
+quote doesn't leave an approved entry stuck in the outbox. If that ceremony
+lapsed, Bloom may open a fresh one for the same entry. A step that has only
+asked for the wallet-policy approval stops with the quote, and status shows
+`expired`. Expiry does not cancel a submitted transaction or revoke an
+allowance. An expired operation's unsent entry holds its nonce, blocking the
+account's later transactions, and Bloom hands it to an identical new intent
+until Bloom expires it an hour after staging. Discard it by writing `cancel`
+to `/wallets/<wallet>/<index>/chains/<chain>/outbox/pending/<id>/confirm`,
+as `confirm`'s refusal says. Reconcile previous steps before creating a fresh
+intent. Lost stage replies are `staging_unknown` and never restaged.
 A persisted writer lock after a crash requires operator inspection; locks are
 not silently expired. The Petal exposes no force-retry or force-unlock route.
 
