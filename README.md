@@ -103,30 +103,40 @@ The plan contains exact-amount token approval steps only when allowance is
 insufficient. A nonzero insufficient allowance is reset first. Each write to
 `confirm.json` advances one step through Bloom's outbox. Complete the owner
 approval shown by Bloom, then retry the same path. Status exposes the outbox
-IDs so the owner can inspect pending approvals in the selected account. When
-Bloom asks for an approval, the step's `approval` gives its action id and
-expiry. The wallet policy must list this package's hash in
-`allowed_petal_packages`; after an install that changes the hash, the first
-`confirm` asks the owner to approve adding it, under
-`/wallets/<wallet>/policy-updates/pending/<action_id>/`. A transaction
-approval is in the step's outbox entry.
+IDs so the owner can inspect pending approvals in the selected account.
+`status.json` is not cached: every read reconciles with the outbox.
 
-If Bloom reports a step `failed` or `cancelled` with no transaction hash
-(refused by policy, expired, or cancelled by the owner), nothing was broadcast
-for it and Bloom never will. The step and the operation become `failed`, and
-`confirm` refuses it: reconcile earlier steps and create a new intent. Bloom
-0.4.1 still reports an expired entry as `pending`, so status keeps waiting on
-it until Bloom records the failure.
+When Bloom asks for an approval, the step's `approval` gives its action id,
+expiry and `kind`. A `transaction` approval is in the step's outbox entry. A
+`wallet_policy` approval adds this package to the wallet policy, which must
+list the package hash in `allowed_petal_packages`. After an install that
+changes the hash, the first `confirm` of a staged step asks for it, under
+`/wallets/<wallet>/policy-updates/pending/<action_id>/`. Staging does not.
+
+If Bloom reports a step `failed` or `cancelled` with no transaction hash, the
+Petal checks the entry under `outbox/failed/` for Bloom's broadcast markers.
+Bloom writes one before it submits a transaction, and a lost submit reply
+leaves the hash only there. With no marker, nothing was sent: the step and the
+operation become `failed` and `confirm` refuses it. Reconcile earlier steps,
+whose approvals stay granted to the router, and create a new intent. With a
+marker, or when the entry is not where Bloom puts discarded ones, the
+transaction may have gone out: the step and the operation become
+`broadcast_unknown`, showing the attempted hash when Bloom recorded one, and
+`confirm` refuses it. Check the chain before creating a new intent. A mined
+cancel replacement also makes a step `failed`. On Bloom 0.4.1 only a cancel
+reports `cancelled`; expired and policy-refused entries still report
+`pending`, so status keeps waiting on them until Bloom records the failure.
+
 `plan.md` reads the input and output decimals from the tokens onchain. Token
 symbols and the maturity date are Pendle's, printed without line breaks or
 markup.
 
-Quotes expire after five minutes. After that, `confirm` stages nothing new
-and starts no approval for a step that hasn't asked for one. A step whose
-approval was already requested can still be confirmed and broadcast, so a
-ceremony that outlasts the quote doesn't leave an approved entry stuck in the
-outbox. If that ceremony lapsed, Bloom may open a fresh one for the same
-entry. Expiry does not cancel a submitted
+Quotes expire after five minutes. After that, `confirm` stages nothing new,
+and only a step whose transaction approval Bloom already requested can
+continue, so a ceremony that outlasts the quote doesn't leave an approved
+entry stuck in the outbox. If that ceremony lapsed, Bloom may open a fresh one
+for the same entry. A step that has only asked for the wallet-policy approval
+stops with the quote. Expiry does not cancel a submitted
 transaction or revoke an allowance. Reconcile previous steps before creating
 a fresh intent. Lost stage replies are `staging_unknown` and never restaged.
 A persisted writer lock after a crash requires operator inspection; locks are
@@ -167,8 +177,9 @@ operation in flight with the build that created it before upgrading.
 
 `scripts/triad-acceptance.py --chain <ethereum|arbitrum>` runs against an
 isolated local fork of that chain, with disposable Signer-created custody and
-software owner ceremonies. Ethereum buys PT-reUSD with reUSD and sells half
-back; Arbitrum buys PT-sUSDai with SY-sUSDai. The public chains are read only.
+software owner ceremonies. Ethereum buys PT-reUSD with reUSD, sells half
+back, then redeems PT-srUSDe, which matured on 22 October 2026, for srUSDe;
+Arbitrum buys PT-sUSDai with SY-sUSDai and sells half back. The public chains are read only.
 Local fork storage mutations supply fixture balances; no real assets are spent.
 Runtime state contains disposable custody data and stays outside this package.
 Acceptance evidence must also be written outside the package to avoid changing

@@ -96,6 +96,15 @@ struct Fake {
     mined: BTreeSet<String>,
     /// What Bloom reports for an unmined entry: its state and any hash.
     outbox: BTreeMap<String, (String, Option<String>)>,
+    /// Receipts Bloom reports, by outbox id, in place of a mined success.
+    receipts: BTreeMap<String, Value>,
+    /// Files the Petal can read through the VFS, by path.
+    files: BTreeMap<String, Vec<u8>>,
+    /// The action id of the approval `confirm` asks for; staged entries carry
+    /// `pending-action`, so any other id is a wallet-policy approval.
+    approval_action: String,
+    /// Fail the next confirm with a host error.
+    fail_confirm: bool,
 }
 impl Default for Fake {
     fn default() -> Self {
@@ -123,6 +132,10 @@ impl Default for Fake {
             approved: false,
             mined: BTreeSet::new(),
             outbox: BTreeMap::new(),
+            receipts: BTreeMap::new(),
+            files: BTreeMap::new(),
+            approval_action: "pending-action".into(),
+            fail_confirm: false,
         }
     }
 }
@@ -136,6 +149,23 @@ impl Fake {
         self.market = eth_market();
         self.quote = eth_quote();
     }
+    /// Bloom moves an entry to `failed/` and reports `state` for it.
+    fn fail_entry(&mut self, chain: Chain, id: &str, state: &str) {
+        self.outbox.insert(id.into(), (state.into(), None));
+        self.files.insert(
+            outbox_path(chain, "failed", id, "intent.json"),
+            json!({"action_id": "pending-action", "status": state})
+                .to_string()
+                .into_bytes(),
+        );
+    }
+}
+/// `account()`'s outbox file, as the Petal reads it.
+fn outbox_path(chain: Chain, dir: &str, id: &str, file: &str) -> String {
+    format!(
+        "wallets/alice/0/chains/{}/outbox/{dir}/{id}/{file}",
+        chain.name()
+    )
 }
 impl Host for Fake {
     fn now_ms(&mut self) -> u64 {
@@ -164,6 +194,15 @@ impl Host for Fake {
     }
     fn vfs(&mut self, _path: &str) -> Result<Vec<u8>> {
         Ok(OWNER.as_bytes().to_vec())
+    }
+    fn vfs_file(&mut self, path: &str, max: usize) -> Result<Option<Vec<u8>>> {
+        Ok(self.files.get(path).map(|bytes| {
+            if bytes.len() > max {
+                vec![]
+            } else {
+                bytes.clone()
+            }
+        }))
     }
     fn chain(&mut self, chain: Chain, method: &str, params: &str) -> Result<String> {
         self.reads.push((chain, method.into()));
@@ -257,20 +296,31 @@ impl Host for Fake {
         if self.lose_stage {
             return Err("lost reply".into());
         }
+        let id = format!("{}-tx", self.staged.len());
+        let chain = if tx.chain == "ethereum" { ETH } else { ARB };
+        self.files.insert(
+            outbox_path(chain, "pending", &id, "intent.json"),
+            json!({"action_id": "pending-action", "status": "pending"})
+                .to_string()
+                .into_bytes(),
+        );
         Ok(StagedTransaction {
-            outbox_id: format!("{}-tx", self.staged.len()),
+            outbox_id: id,
             plan_md: "owner review".into(),
             approval: None,
         })
     }
     fn confirm(&mut self, _wallet: &str, chain: Chain, id: &str) -> Result<StagedTransaction> {
         self.confirms.push(chain);
+        if std::mem::take(&mut self.fail_confirm) {
+            return Err("Bloom has not confirmed the transaction".into());
+        }
         if !self.approved {
             return Ok(StagedTransaction {
                 outbox_id: id.into(),
                 plan_md: "owner approval pending".into(),
                 approval: Some(petal::sdk::OutboxApproval {
-                    action_id: "pending-action".into(),
+                    action_id: self.approval_action.clone(),
                     expires_ms: self.now + 60_000,
                 }),
             });
@@ -284,6 +334,14 @@ impl Host for Fake {
     }
     fn inspect(&mut self, _wallet: &str, chain: Chain, id: &str) -> Result<OutboxInspection> {
         self.inspects.push(chain);
+        if let Some(receipt) = self.receipts.get(id) {
+            return Ok(OutboxInspection {
+                outbox_id: id.into(),
+                state: receipt["outcome"].as_str().unwrap().into(),
+                tx_hash: Some("0xabc".into()),
+                receipt_json: Some(receipt.to_string()),
+            });
+        }
         let mined = self.mined.contains(id);
         if let (false, Some((state, tx_hash))) = (mined, self.outbox.get(id)) {
             return Ok(OutboxInspection {
@@ -1136,23 +1194,43 @@ fn rest_reads_preserve_http_failure_and_bound_response_size() {
         "Pendle response is too large"
     );
 }
+fn sell_quote() -> Value {
+    serde_json::from_str(include_str!("fixtures/quote-sell.json")).unwrap()
+}
+fn redeem_market() -> Market {
+    serde_json::from_str(include_str!("fixtures/market-ethereum-srusde.json")).unwrap()
+}
+fn redeem_quote() -> Value {
+    serde_json::from_str(include_str!("fixtures/quote-ethereum-srusde-redeem.json")).unwrap()
+}
+/// Stage the first step of a buy and have Bloom ask for its approval.
+fn staged_with_approval(h: &mut Fake) {
+    workflow::create(h, ARB, &account(), BUY, "one", &body()).unwrap();
+    workflow::confirm(h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+}
+const NEVER_SENT: &str = "Bloom refused, cancelled or expired an outbox step it never broadcast; reconcile prior steps and create a new reviewed intent";
+const MAYBE_SENT: &str = "Bloom no longer sends an outbox step but may have broadcast it; check its hash on chain before creating a new intent";
+const EXPIRED: &str = "quote expired; reconcile prior steps and create a new reviewed intent";
+const TAMPERED: &str = "operation steps do not match the reviewed intent";
+
 #[test]
-fn entries_bloom_failed_or_cancelled_end_the_operation() {
+fn entries_bloom_never_sent_end_the_operation() {
     for state in ["failed", "cancelled"] {
         let mut h = Fake::default();
-        workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
-        h.outbox.insert("1-tx".into(), (state.into(), None));
+        staged_with_approval(&mut h);
+        h.fail_entry(ARB, "1-tx", state);
         let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
         assert_eq!(
             (d.state.as_str(), d.steps[0].state.as_str()),
             ("failed", "failed")
         );
+        // A failed step no longer shows the approval it had asked for.
+        assert_eq!(d.steps[0].approval, None);
         let confirms = h.confirms.len();
         assert_eq!(
             workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
-            "Bloom refused, cancelled or expired an outbox step before broadcast; reconcile prior steps and create a new reviewed intent"
+            NEVER_SENT
         );
         // Nothing is confirmed again and nothing new is staged.
         assert_eq!((h.confirms.len(), h.staged.len()), (confirms, 1));
@@ -1168,29 +1246,159 @@ fn entries_bloom_failed_or_cancelled_end_the_operation() {
     assert_ne!(d.state, "failed");
 }
 #[test]
+fn entries_bloom_may_have_broadcast_are_never_abandoned() {
+    let cases: [(&str, Option<&str>); 4] = [
+        // A lost submit reply leaves the hash only in Bloom's marker.
+        ("broadcast_attempted.json", Some("0xfeed")),
+        ("replacement_broadcast_attempted.json", None),
+        ("cancel_broadcast_attempted.json", None),
+        // Bloom reports it cancelled, but it is not where discarded entries go.
+        ("", None),
+    ];
+    for (marker, hash) in cases {
+        let mut h = Fake::default();
+        staged_with_approval(&mut h);
+        h.fail_entry(ARB, "1-tx", "cancelled");
+        if marker.is_empty() {
+            h.files
+                .remove(&outbox_path(ARB, "failed", "1-tx", "intent.json"));
+        } else {
+            h.files.insert(
+                outbox_path(ARB, "failed", "1-tx", marker),
+                json!({"tx_hash": "0xfeed"}).to_string().into_bytes(),
+            );
+        }
+        let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+        assert_eq!(
+            (d.state.as_str(), d.steps[0].state.as_str()),
+            ("broadcast_unknown", "broadcast_unknown"),
+            "{marker}"
+        );
+        assert_eq!(d.steps[0].tx_hash.as_deref(), hash, "{marker}");
+        let confirms = h.confirms.len();
+        assert_eq!(
+            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+            MAYBE_SENT,
+            "{marker}"
+        );
+        assert_eq!((h.confirms.len(), h.staged.len()), (confirms, 1));
+    }
+}
+#[test]
+fn a_mined_cancel_receipt_fails_the_step() {
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.receipts.insert(
+        "1-tx".into(),
+        json!({"outcome": "cancelled", "tx_hash": "0xabc"}),
+    );
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(
+        (d.state.as_str(), d.steps[0].state.as_str()),
+        ("failed", "failed")
+    );
+}
+#[test]
 fn status_names_the_pending_owner_approval() {
     let mut h = Fake::default();
-    workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    staged_with_approval(&mut h);
     let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
     assert_eq!(
         d.steps[0].approval,
         Some(workflow::Approval {
             action_id: "pending-action".into(),
             expires_ms: h.now + 60_000,
+            kind: "transaction".into(),
         })
     );
     let shown = serde_json::to_value(&d).unwrap();
-    assert_eq!(shown["steps"][0]["approval"]["action_id"], "pending-action");
+    assert_eq!(shown["steps"][0]["approval"]["kind"], "transaction");
     assert!(shown["steps"][1].get("approval").is_none());
+    // Once Bloom broadcasts the step, the approval is gone.
     h.approved = true;
     workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
     let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
     assert_eq!(d.steps[0].approval, None);
+    // Any other action id is the wallet-policy approval for this package.
+    let mut h = Fake {
+        approval_action: "policy-update".into(),
+        ..Fake::default()
+    };
+    staged_with_approval(&mut h);
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(d.steps[0].approval.as_ref().unwrap().kind, "wallet_policy");
 }
 #[test]
-fn tampered_approval_steps_are_refused() {
+fn only_a_requested_transaction_approval_outlives_the_quote() {
+    // A host error is not an approval request.
+    let mut h = Fake::default();
+    workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    h.fail_confirm = true;
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+    let d = workflow::load(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(
+        (d.state.as_str(), d.steps[0].approval.is_none()),
+        ("staged", true)
+    );
+    h.now += 300_001;
+    let confirms = h.confirms.len();
+    assert_eq!(
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        EXPIRED
+    );
+    assert_eq!(h.confirms.len(), confirms);
+
+    // The wallet-policy approval is not the transaction's.
+    let mut h = Fake {
+        approval_action: "policy-update".into(),
+        ..Fake::default()
+    };
+    staged_with_approval(&mut h);
+    h.now += 300_001;
+    let confirms = h.confirms.len();
+    assert_eq!(
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        EXPIRED
+    );
+    assert_eq!(h.confirms.len(), confirms);
+
+    // An approval recorded without a kind counts as neither.
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    let key = "operations/arbitrum/buy-pt/one.json";
+    let mut record: Value = serde_json::from_slice(&h.store[key]).unwrap();
+    record["steps"][0]["approval"]
+        .as_object_mut()
+        .unwrap()
+        .remove("kind");
+    h.store
+        .insert(key.into(), serde_json::to_vec(&record).unwrap());
+    h.now += 300_001;
+    assert_eq!(
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        EXPIRED
+    );
+
+    // An error after the transaction approval was requested keeps it, so a
+    // ceremony the owner finishes after expiry still broadcasts.
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.fail_confirm = true;
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+    assert_eq!(
+        workflow::load(&mut h, ARB, &account(), BUY, "one")
+            .unwrap()
+            .state,
+        "approval_required"
+    );
+    h.now += 300_001;
+    h.approved = true;
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    assert_eq!(h.mined, BTreeSet::from(["1-tx".into()]));
+}
+#[test]
+fn tampered_operation_steps_are_refused() {
     let mut h = Fake {
         allowance: U256::from(1),
         ..Fake::default()
@@ -1198,6 +1406,8 @@ fn tampered_approval_steps_are_refused() {
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
     let key = "operations/arbitrum/buy-pt/one.json";
     let original: Value = serde_json::from_slice(&h.store[key]).unwrap();
+    let steps = original["steps"].as_array().unwrap().clone();
+    let (reset, approve, execute) = (&steps[0], &steps[1], &steps[2]);
     let unlimited = format!(
         "0x{}",
         hex::encode(
@@ -1208,57 +1418,123 @@ fn tampered_approval_steps_are_refused() {
             .abi_encode()
         )
     );
-    let cases: [(usize, &str, Value, &str); 4] = [
-        // An unlimited approval in place of the exact input.
-        (
-            1,
-            "data",
-            json!(unlimited),
-            "approval step does not match the reviewed intent",
-        ),
-        // The same approval aimed at another token.
-        (
-            1,
-            "to",
-            json!(market().pt.address),
-            "approval step does not match the reviewed intent",
-        ),
-        // A nonzero reset.
-        (
-            0,
-            "data",
-            original["steps"][1]["transaction"]["data"].clone(),
-            "approval step does not match the reviewed intent",
-        ),
-        // A step kind this Petal never builds.
-        (
-            0,
-            "kind",
-            json!("transfer"),
-            "unexpected step before the Pendle execution",
-        ),
+    let mut unlimited_step = approve.clone();
+    unlimited_step["transaction"]["data"] = json!(unlimited);
+    let mut other_token = approve.clone();
+    other_token["transaction"]["to"] = json!(market().pt.address);
+    let mut nonzero_reset = reset.clone();
+    nonzero_reset["transaction"]["data"] = approve["transaction"]["data"].clone();
+    let mut renamed = reset.clone();
+    renamed["kind"] = json!("transfer");
+    let cases = [
+        ("unlimited approval", vec![reset, &unlimited_step, execute]),
+        ("another token", vec![reset, &other_token, execute]),
+        ("nonzero reset", vec![&nonzero_reset, approve, execute]),
+        ("unknown kind", vec![&renamed, approve, execute]),
+        ("reordered", vec![approve, reset, execute]),
+        ("duplicated approval", vec![approve, approve, execute]),
+        ("extra approval", vec![reset, approve, approve, execute]),
     ];
-    for (index, field, value, error) in cases {
+    for (case, steps) in cases {
         let mut record = original.clone();
-        if field == "kind" {
-            record["steps"][index][field] = value;
-        } else {
-            record["steps"][index]["transaction"][field] = value;
-        }
+        record["steps"] = json!(steps);
         h.store
             .insert(key.into(), serde_json::to_vec(&record).unwrap());
-        // Each tampered step is refused when it would be staged.
-        if index == 1 {
-            let mut done = record.clone();
-            done["steps"][0]["state"] = json!("confirmed");
-            h.store
-                .insert(key.into(), serde_json::to_vec(&done).unwrap());
-        }
         assert_eq!(
             workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").err(),
-            Some(error.to_string()),
-            "{index} {field}"
+            Some(TAMPERED.to_string()),
+            "{case}"
         );
-        assert!(h.staged.is_empty());
+        assert!(h.staged.is_empty(), "{case}");
+    }
+}
+#[test]
+fn approval_steps_rebuild_for_every_operation() {
+    let exact = U256::from(10u64.pow(18));
+    let m = market();
+    let r = redeem_market();
+    // A buy that resets a leftover allowance, a sell and a redemption.
+    let cases = [
+        (
+            ARB,
+            BUY,
+            m.clone(),
+            quote(),
+            U256::from(1),
+            m.sy.address.clone(),
+            m.sy.address.clone(),
+        ),
+        (
+            ARB,
+            Operation::SellPt,
+            m.clone(),
+            sell_quote(),
+            U256::ZERO,
+            m.sy.address.clone(),
+            m.pt.address.clone(),
+        ),
+        (
+            ETH,
+            Operation::RedeemPt,
+            r.clone(),
+            redeem_quote(),
+            U256::ZERO,
+            r.underlying_asset.address.clone(),
+            r.pt.address.clone(),
+        ),
+    ];
+    for (chain, op, market, quote, allowance, token, spent) in cases {
+        let mut h = Fake {
+            expired: op == Operation::RedeemPt,
+            market: market.clone(),
+            quote,
+            allowance,
+            approved: true,
+            ..Fake::default()
+        };
+        let request = DraftInput {
+            market: market.address.clone(),
+            token,
+            amount: exact.to_string(),
+            min_output: "1".into(),
+            slippage_bps: 10,
+            max_price_impact_bps: 100,
+        };
+        let body = serde_json::to_vec(&request).unwrap();
+        workflow::create(&mut h, chain, &account(), op, "one", &body).unwrap();
+        let steps = workflow::load(&mut h, chain, &account(), op, "one")
+            .unwrap()
+            .steps
+            .len();
+        // Each step stages, then broadcasts; approvals first, as built.
+        for _ in 0..steps * 2 {
+            workflow::confirm(&mut h, chain, &account(), op, "one", b"confirm").unwrap();
+        }
+        assert_eq!(
+            workflow::reconcile(&mut h, chain, &account(), op, "one")
+                .unwrap()
+                .state,
+            "execution_confirmed",
+            "{op:?}"
+        );
+        let amounts: Vec<U256> = h.staged[..steps - 1]
+            .iter()
+            .map(|tx| {
+                assert_eq!(address(&tx.to).unwrap(), address(&spent).unwrap(), "{op:?}");
+                let a = approveCall::abi_decode(&hex::decode(&tx.data_hex[2..]).unwrap()).unwrap();
+                assert_eq!(a.spender, address(ROUTER).unwrap());
+                a.amount
+            })
+            .collect();
+        let expected = if allowance.is_zero() {
+            vec![exact]
+        } else {
+            vec![U256::ZERO, exact]
+        };
+        assert_eq!(amounts, expected, "{op:?}");
+        assert_eq!(
+            address(&h.staged[steps - 1].to).unwrap(),
+            address(ROUTER).unwrap()
+        );
     }
 }

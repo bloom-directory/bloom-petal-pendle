@@ -5,6 +5,9 @@ pub trait Host {
     fn now_ms(&mut self) -> u64;
     fn http(&mut self, request: HttpRequest, max: usize) -> Result<HttpResponse>;
     fn vfs(&mut self, path: &str) -> Result<Vec<u8>>;
+    /// A VFS file's bytes, or `None` when it does not exist. A file longer
+    /// than `max` exists but comes back empty.
+    fn vfs_file(&mut self, path: &str, max: usize) -> Result<Option<Vec<u8>>>;
     fn chain(&mut self, chain: Chain, method: &str, params: &str) -> Result<String>;
     fn get(&mut self, key: &str) -> Result<Option<Vec<u8>>>;
     fn put(&mut self, key: &str, value: &[u8]) -> Result<()>;
@@ -25,6 +28,16 @@ impl Host for BloomHost {
     fn vfs(&mut self, path: &str) -> Result<Vec<u8>> {
         petal::sdk::vfs_read(path, 128)
             .map_err(|_| "selected account address is unavailable".into())
+    }
+    fn vfs_file(&mut self, path: &str, max: usize) -> Result<Option<Vec<u8>>> {
+        match petal::sdk::vfs_read(path, max) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(petal::SdkError::Host(petal::HostStatus::NotFound)) => Ok(None),
+            Err(petal::SdkError::Host(petal::HostStatus::BufferTooSmall { .. })) => {
+                Ok(Some(Vec::new()))
+            }
+            Err(_) => Err("outbox entry read failed".into()),
+        }
     }
     fn chain(&mut self, chain: Chain, method: &str, params: &str) -> Result<String> {
         petal::sdk::chain_read(chain.name(), method, params)

@@ -11,6 +11,12 @@ material is included.
 - `quote-ethereum-reusd-limit-fill.json`, recorded on 2026-10-29: the same
   swap for 500,000 reUSD with Pendle's default `useLimitOrder`, which embeds a
   LimitRouter flash fill. The Petal must refuse it.
+- `quote-sell.json`, recorded on 2026-10-30: Arbitrum, 1 PT-sUSDai of the
+  `market.json` market to SY-sUSDai, with `enableAggregator` and
+  `useLimitOrder` off.
+- `market-ethereum-srusde.json` and `quote-ethereum-srusde-redeem.json`,
+  recorded on 2026-10-30: Ethereum, redeeming 1 matured PT-srUSDe (October
+  2026) to srUSDe, with `enableAggregator` and `useLimitOrder` off.
 
 The market fixtures keep only the fields `api::Market` reads. Quotes are the
 full response.

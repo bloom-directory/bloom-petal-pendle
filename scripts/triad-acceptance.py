@@ -42,6 +42,15 @@ CHAINS = {
         "token": "0x5086bf358635b81d8c47c66d1c8b9e567db70c72",
         "balance_slot": "0x52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace00",
         "buy_floor": 10**6,
+        # A market that matured on 22 Oct 2026, to redeem PT for its
+        # underlying srUSDe. `pt_balance_slot` is the PT's balance mapping.
+        "redeem": {
+            "market": "0x66ec657c59cdcaf171ab43b83da3942758bf8a97",
+            "pt": "0x59bc9fae5d62b19d4f8d07d758047acb9ee19d34",
+            "token": "0x3d7d6fdf07ee548b939a80edbc9b2256d0cdc003",
+            # Verified on the fork: PT-srUSDe keeps balances in slot 0.
+            "pt_balance_slot": "0",
+        },
     },
 }
 
@@ -174,8 +183,11 @@ def main():
     passed("Signer-created account one differs from account zero")
     policy = json.loads(read(f"/wallets/{wallet}/policy.json"))
     policy["allowed_petal_packages"] = [report["package_hash"]]
-    # The token approval goes to the input token for a buy and to PT for a sell.
-    policy["allowed_destinations"] = [{"chain": chain, "destination": d} for d in sorted({TOKEN, PT, ROUTER})]
+    # The token approval goes to the input token for a buy and to PT for a sell
+    # or a redemption.
+    redeem = config.get("redeem")
+    destinations = {TOKEN, PT, ROUTER} | ({redeem["pt"]} if redeem else set())
+    policy["allowed_destinations"] = [{"chain": chain, "destination": d} for d in sorted(destinations)]
     policy_file = work / (wallet + "-policy.json")
     policy_file.write_text(json.dumps(policy))
     launch = cli("wallet", "update-policy", wallet, "--file", str(policy_file)).stdout
@@ -194,9 +206,9 @@ def main():
     assert all(p["chainId"] == config["chain_id"] for p in portfolio["positions"])
     passed("selected-account live portfolio API")
 
-    def execute(op, name, input_amount, floor):
+    def execute(op, name, input_amount, floor, market=MARKET, token=TOKEN):
         base = f"/petals/pendle/{chain}/{op}/{wallet}/1/{name}"
-        request = {"market": MARKET, "token": TOKEN, "amount": str(input_amount), "min_output": str(floor), "slippage_bps": 50, "max_price_impact_bps": 100}
+        request = {"market": market, "token": token, "amount": str(input_amount), "min_output": str(floor), "slippage_bps": 50, "max_price_impact_bps": 100}
         write(base + "/draft.json", request)
         original = json.loads(read(base + "/status.json"))
         assert original["account"] == 1 and original["owner"].lower() == owner
@@ -217,7 +229,7 @@ def main():
                     assert receipt["status"] == "0x1" and receipt["from"].lower() == owner
                     report["transactions"].append({"operation": op, "step": step["kind"], "hash": step["tx_hash"], "receipt_status": receipt["status"]})
                 return observed
-            assert observed["state"] not in ("reverted", "staging_unknown", "failed"), observed["state"]
+            assert observed["state"] not in ("reverted", "staging_unknown", "failed", "broadcast_unknown"), observed["state"]
             result = write(base + "/confirm.json", "confirm", check=False)
             observed = json.loads(read(base + "/status.json"))
             for step in observed["steps"]:
@@ -246,6 +258,19 @@ def main():
     assert token_delta >= int(sold["encoded_minimum"])
     report["token_received_on_sell"] = str(token_delta)
     passed("PT sell mined through Broker/Signer; output meets encoded floor")
+    if redeem:
+        # Fork-only matured PT, written to its balance mapping like the token.
+        index = command(["cast", "index", "address", owner, redeem["pt_balance_slot"]]).stdout.strip()
+        assert balance(redeem["pt"], owner) == 0
+        rpc("anvil_setStorageAt", [redeem["pt"], index, "0x" + hex(10**18)[2:].rjust(64, "0")])
+        assert balance(redeem["pt"], owner) == 10**18
+        output_before = balance(redeem["token"], owner)
+        redeemed = execute("redeem-pt", "accept-redeem", 10**18, 1, redeem["market"], redeem["token"])
+        output_delta = balance(redeem["token"], owner) - output_before
+        assert balance(redeem["pt"], owner) == 0
+        assert output_delta >= int(redeemed["encoded_minimum"])
+        report["redeem_output"] = str(output_delta)
+        passed("matured PT redeemed through Broker/Signer; output meets encoded floor")
     report["software_owner_ceremonies"] = count
     report["scope"] = "Local fork with real Pendle contracts, compiled WASM and real triad processes; fixture balances and software passkeys. No mainnet broadcast or physical-passkey acceptance."
     report["result"] = "passed"
