@@ -170,7 +170,9 @@ pub fn create<H: Host>(
     let impact = route["data"]["priceImpact"]
         .as_f64()
         .ok_or("quote omitted price impact")?;
-    if !impact.is_finite() || impact > f64::from(request.max_price_impact_bps) / 10000.0 {
+    // Pendle reports an adverse impact as a negative fraction, so the ceiling
+    // bounds its size, whichever its sign.
+    if !impact.is_finite() || impact.abs() > f64::from(request.max_price_impact_bps) / 10000.0 {
         return Err("price impact exceeds the requested ceiling".into());
     }
     let outputs = route["outputs"].as_array().ok_or("quote omitted outputs")?;
@@ -1005,6 +1007,11 @@ fn advance<H: Host>(
                 // granted ceremony still works once the quote has expired.
                 settle(&mut draft, host.now_ms());
                 save(host, &draft)?;
+                let denied = error == "Bloom denied the transaction";
+                if denied || error == "Bloom has not confirmed the transaction" {
+                    let detail = refusal_detail(host, account, chain, &outbox_id, denied);
+                    return Err(format!("{error}: {detail}"));
+                }
                 Err(error)
             }
         }
@@ -1031,6 +1038,48 @@ fn advance<H: Host>(
         save(host, &draft)?;
         claim(host, &mut draft, account, chain, op, id, index)
     }
+}
+
+/// What the outbox shows about a confirm Bloom refused or denied. Bloom
+/// passes the Petal a status, not its reason, so the entry itself says which
+/// kind of refusal it was. A file that cannot be read says nothing.
+fn refusal_detail<H: Host>(
+    host: &mut H,
+    account: &WalletAccount,
+    chain: Chain,
+    id: &str,
+    denied: bool,
+) -> String {
+    let mut read = |dir: &str, file: &str| {
+        outbox_entry(account, chain, dir, id)
+            .and_then(|entry| host.vfs_file(&format!("{entry}/{file}"), 64 * 1024))
+            .ok()
+            .flatten()
+    };
+    if read("failed", "intent.json").is_some() {
+        return "Bloom discarded the entry unsent, as it does after a policy refusal, a refused approval or a ceremony limit; status shows the operation failed".into();
+    }
+    if let Some(gap) = read("pending", "nonce_gap.json") {
+        let blocked = serde_json::from_slice::<Value>(&gap)
+            .ok()
+            .and_then(|gap| {
+                gap["blocked_by"].as_array().map(|entries| {
+                    entries
+                        .iter()
+                        .filter_map(|entry| entry["id"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+            })
+            .unwrap_or_default();
+        return format!(
+            "Bloom holds it behind this account's earlier pending outbox entries {blocked}; finish or discard those first"
+        );
+    }
+    if denied {
+        return "check that the wallet policy allows this package and the transaction's target; Bloom's log has the reason".into();
+    }
+    "Bloom could not prepare or send it, for example because its gas estimate reverts on an insufficient balance or allowance; Bloom's log has the reason".into()
 }
 
 /// Claims the outbox entry Bloom staged for step `index`. While an entry is

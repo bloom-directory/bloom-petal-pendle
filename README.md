@@ -58,6 +58,8 @@ Draft body (all amounts are decimal strings in base units):
 `token` is the input asset for buys and output asset for sells/redemptions.
 SY is supported directly. Other ERC-20s must be native inputs/outputs of that
 market's SY wrapper. Slippage is 1–100 bps; price impact ceiling is 0–300 bps.
+The ceiling bounds the size of the impact Pendle reports, which is negative
+for an adverse move.
 PT maturity/redemption is expressed in the accounting asset, which can differ
 from the underlying asset. API APYs and expected amounts remain estimates.
 
@@ -104,6 +106,13 @@ insufficient. A nonzero insufficient allowance is reset first. Each write to
 `confirm.json` advances one step through Bloom's outbox. Complete the owner
 approval shown by Bloom, then retry the same path. Status exposes the outbox
 IDs so the owner can inspect pending approvals in the selected account.
+When Bloom refuses or denies a confirm, the error says what the outbox entry
+shows: Bloom discarded it unsent (a policy refusal, a refused approval or a
+ceremony limit), holds it behind earlier pending entries, or, for a denial,
+that the wallet policy should allow the package and the target; otherwise
+Bloom could not prepare it, for example because its gas estimate reverts on
+an insufficient balance. Bloom's own reason is only in its log: the Petal
+SDK passes a status, not a message.
 `status.json` is not cached: every read reconciles with the outbox and
 derives the operation's `state` from its steps. It is `prepared` or `staged`
 when the next `confirm` stages or sends a step, `approval_required` while an

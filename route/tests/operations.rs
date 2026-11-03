@@ -121,6 +121,9 @@ struct Fake {
     allowance_calls: Vec<(Address, Address, Address)>,
     /// Bloom refuses to report the entry, as for another account's.
     inspect_refused: bool,
+    /// How the next confirm fails: Bloom `discard`s the entry, records a
+    /// nonce `gap`, or leaves no trace (`plain`).
+    confirm_failure: Option<&'static str>,
 }
 impl Default for Fake {
     fn default() -> Self {
@@ -159,6 +162,7 @@ impl Default for Fake {
             stage_id: None,
             allowance_calls: vec![],
             inspect_refused: false,
+            confirm_failure: None,
         }
     }
 }
@@ -408,6 +412,24 @@ impl Host for Fake {
     fn confirm(&mut self, _wallet: &str, chain: Chain, id: &str) -> Result<StagedTransaction> {
         self.confirms.push(chain);
         if std::mem::take(&mut self.fail_confirm) {
+            return Err("Bloom has not confirmed the transaction".into());
+        }
+        if let Some(failure) = self.confirm_failure.take() {
+            match failure {
+                "discard" | "denied-discard" => self.fail_entry(chain, id, "pending"),
+                "gap" => {
+                    self.files.insert(
+                        outbox_path(chain, "pending", id, "nonce_gap.json"),
+                        json!({"blocked_by": [{"nonce": 0, "id": "9-tx"}]})
+                            .to_string()
+                            .into_bytes(),
+                    );
+                }
+                _ => {}
+            }
+            if failure.starts_with("denied") {
+                return Err("Bloom denied the transaction".into());
+            }
             return Err("Bloom has not confirmed the transaction".into());
         }
         if !self.approved {
@@ -2875,4 +2897,88 @@ fn shared_entry_advice_follows_the_holders_approval() {
         );
     }
     assert!(refusal("exhausted").contains("it may have been sent or signed"));
+}
+#[test]
+fn the_price_impact_ceiling_bounds_pendles_negative_impact() {
+    // Pendle reports an adverse impact as a negative fraction: the fixture's
+    // quote moves the price by 0.0632%.
+    let impact = quote()["routes"][0]["data"]["priceImpact"]
+        .as_f64()
+        .unwrap();
+    assert!(impact < 0.0 && impact.abs() > 0.0006 && impact.abs() < 0.0007);
+    for (bps, refused) in [(6, true), (7, false), (100, false)] {
+        let mut h = Fake::default();
+        let request = DraftInput {
+            max_price_impact_bps: bps,
+            ..request()
+        };
+        let created = workflow::create(
+            &mut h,
+            ARB,
+            &account(),
+            BUY,
+            "one",
+            &serde_json::to_vec(&request).unwrap(),
+        );
+        assert_eq!(
+            created.err().as_deref(),
+            refused.then_some("price impact exceeds the requested ceiling"),
+            "{bps} bps"
+        );
+    }
+    // A much larger adverse move is refused under the usual ceiling.
+    let mut h = Fake::default();
+    h.quote["routes"][0]["data"]["priceImpact"] = json!(-0.05);
+    assert_eq!(
+        workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap_err(),
+        "price impact exceeds the requested ceiling"
+    );
+}
+#[test]
+fn a_refused_confirm_says_what_bloom_did() {
+    let refusal = |failure: &'static str| {
+        let mut h = Fake::default();
+        staged_with_approval(&mut h);
+        h.confirm_failure = Some(failure);
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err()
+    };
+    let prefix = "Bloom has not confirmed the transaction: ";
+    assert_eq!(
+        refusal("discard"),
+        format!(
+            "{prefix}Bloom discarded the entry unsent, as it does after a policy refusal, a refused approval or a ceremony limit; status shows the operation failed"
+        )
+    );
+    assert_eq!(
+        refusal("gap"),
+        format!(
+            "{prefix}Bloom holds it behind this account's earlier pending outbox entries 9-tx; finish or discard those first"
+        )
+    );
+    assert_eq!(
+        refusal("plain"),
+        format!(
+            "{prefix}Bloom could not prepare or send it, for example because its gas estimate reverts on an insufficient balance or allowance; Bloom's log has the reason"
+        )
+    );
+    // Bloom also denies a transaction its policy refuses.
+    assert_eq!(
+        refusal("denied-discard"),
+        "Bloom denied the transaction: Bloom discarded the entry unsent, as it does after a policy refusal, a refused approval or a ceremony limit; status shows the operation failed"
+    );
+    assert_eq!(
+        refusal("denied"),
+        "Bloom denied the transaction: check that the wallet policy allows this package and the transaction's target; Bloom's log has the reason"
+    );
+    // After a discard, status agrees.
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.confirm_failure = Some("discard");
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+    assert_eq!(
+        workflow::reconcile(&mut h, ARB, &account(), BUY, "one")
+            .unwrap()
+            .state,
+        "failed"
+    );
 }

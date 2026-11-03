@@ -68,8 +68,11 @@ impl Host for BloomHost {
         })
     }
     fn confirm(&mut self, wallet: &str, chain: Chain, id: &str) -> Result<StagedTransaction> {
-        petal::sdk::tx_confirm(wallet, chain.name(), id, false).map_err(|_| {
-            "Bloom has not confirmed the transaction; inspect its owner approval and outbox".into()
+        petal::sdk::tx_confirm(wallet, chain.name(), id, false).map_err(|error| match error {
+            petal::SdkError::Host(petal::HostStatus::Denied) => {
+                "Bloom denied the transaction".into()
+            }
+            _ => "Bloom has not confirmed the transaction".into(),
         })
     }
     fn inspect(&mut self, wallet: &str, chain: Chain, id: &str) -> Result<OutboxInspection> {
