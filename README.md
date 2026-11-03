@@ -117,13 +117,19 @@ every allowance reset have the same calldata. So each operation claims the
 entries it stages, by outbox id and creation time, since ids repeat after
 Bloom restarts. When Bloom returns an entry another operation holds,
 `confirm` stages nothing for this one and names that operation and the
-entry: finish that operation, or discard the entry by writing `cancel` to
-its `confirm` file, then confirm this one again.
+entry. Finish that operation, or, if Bloom never tried to send the entry,
+discard it by writing `cancel` to its `confirm` file, then confirm this one
+again. Bloom 0.4.1 discards whatever is written `cancel` there, so the
+refusal names that file only for an entry with no send attempt.
 
 Operations that spend the same token share the router's allowance, and one
-exact approval replaces another, so run them one at a time. `confirm` refuses
-to stage or send a Pendle transaction the allowance cannot cover, which would
-revert: create a new intent instead.
+exact approval replaces another, so run them one at a time. `confirm` waits
+while another of the account's operations has a transaction on the same
+token in flight, and refuses to stage or send a Pendle transaction the mined
+allowance cannot cover, which would revert. Two `confirm` writes racing on
+different operations can still both pass. After such a refusal, discard the
+staged swap as the refusal says, then create a new intent: an entry left
+pending holds its nonce, and Bloom stages later transactions behind it.
 
 When Bloom asks for an approval, the step's `approval` gives its action id,
 expiry and `kind`. A `transaction` approval is in the step's outbox entry. It
@@ -158,8 +164,15 @@ cancel makes the step `failed`. An entry later Bloom reports
 signed, is `broadcast_unknown`.
 
 A lost submit reply can also leave the broadcast marker in a pending entry.
-The step stays `staged`, showing the marker's hash, and never `expired`:
-the next `confirm` lets Bloom settle that attempt.
+The step stays `staged`, showing the marker's hash, asks for no ceremony and
+never expires: the next `confirm` lets Bloom settle that attempt, without
+rechecking the market. A marker with no readable hash, a same-nonce
+replacement or cancel recorded in the pending entry (`replacement_tx_hash`,
+`cancel_tx_hash`), and Bloom's `reconcile_ambiguous.json`, written when it
+cannot settle the attempt, make the step `broadcast_unknown` instead: check
+the hashes on chain. Bloom reports the first entry it finds under an id, so
+a step whose entry's creation time differs from the one reported is
+`broadcast_unknown` too.
 
 `plan.md` reads the input and output decimals from the tokens onchain. Token
 symbols and the maturity date are Pendle's, printed without line breaks or
@@ -176,8 +189,11 @@ allowance. An expired operation's unsent entry holds its nonce, blocking the
 account's later transactions, and Bloom hands it to an identical new intent
 until Bloom expires it an hour after staging. Discard it by writing `cancel`
 to `/wallets/<wallet>/<index>/chains/<chain>/outbox/pending/<id>/confirm`,
-as `confirm`'s refusal says. Reconcile previous steps before creating a fresh
-intent. Lost stage replies are `staging_unknown` and never restaged.
+as `confirm`'s refusal says. Later Bloom refuses to discard an entry that may
+have been signed. Reconcile previous steps before creating a fresh intent.
+Lost stage replies are `staging_unknown` and never restaged. When Bloom
+staged the entry but the Petal could not claim it, status shows the outbox
+id and the next `confirm` finishes the claim.
 A persisted writer lock after a crash requires operator inspection; locks are
 not silently expired. The Petal exposes no force-retry or force-unlock route.
 
