@@ -1007,12 +1007,11 @@ fn advance<H: Host>(
                 // granted ceremony still works once the quote has expired.
                 settle(&mut draft, host.now_ms());
                 save(host, &draft)?;
-                let denied = error == "Bloom denied the transaction";
-                if denied || error == "Bloom has not confirmed the transaction" {
-                    let detail = refusal_detail(host, account, chain, &outbox_id, denied);
-                    return Err(format!("{error}: {detail}"));
+                let step = draft.steps[index].clone();
+                match refusal_detail(host, account, chain, &step, &error) {
+                    Some(detail) => Err(format!("{error}: {detail}")),
+                    None => Err(error),
                 }
-                Err(error)
             }
         }
     } else {
@@ -1040,46 +1039,46 @@ fn advance<H: Host>(
     }
 }
 
-/// What the outbox shows about a confirm Bloom refused or denied. Bloom
-/// passes the Petal a status, not its reason, so the entry itself says which
-/// kind of refusal it was. A file that cannot be read says nothing.
+/// What to add to a confirm Bloom refused. A refusal must never read as
+/// "not sent" when Bloom may have sent the step. Otherwise Bloom's own
+/// reason stands, unless the SDK reduced it to a bare status ("denied",
+/// "not found", "invalid"): then the step's own outbox entry says what
+/// happened. A file that cannot be read says nothing.
 fn refusal_detail<H: Host>(
     host: &mut H,
     account: &WalletAccount,
     chain: Chain,
-    id: &str,
-    denied: bool,
-) -> String {
-    let mut read = |dir: &str, file: &str| {
-        outbox_entry(account, chain, dir, id)
-            .and_then(|entry| host.vfs_file(&format!("{entry}/{file}"), 64 * 1024))
-            .ok()
-            .flatten()
-    };
-    if read("failed", "intent.json").is_some() {
-        return "Bloom discarded the entry unsent, as it does after a policy refusal, a refused approval or a ceremony limit; status shows the operation failed".into();
-    }
-    if let Some(gap) = read("pending", "nonce_gap.json") {
-        let blocked = serde_json::from_slice::<Value>(&gap)
-            .ok()
-            .and_then(|gap| {
-                gap["blocked_by"].as_array().map(|entries| {
-                    entries
-                        .iter()
-                        .filter_map(|entry| entry["id"].as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-            })
-            .unwrap_or_default();
-        return format!(
-            "Bloom holds it behind this account's earlier pending outbox entries {blocked}; finish or discard those first"
+    step: &Step,
+    error: &str,
+) -> Option<String> {
+    let id = step.outbox_id.as_deref()?;
+    let attempts = pending_attempts(host, account, chain, id).ok().flatten();
+    let gone = discarded(host, account, chain, id, step.outbox_created_ms)
+        .ok()
+        .flatten();
+    if step.tx_hash.is_some()
+        || attempts.as_ref().is_some_and(|attempts| !attempts.unsent())
+        || gone.as_ref().is_some_and(|gone| gone.maybe_sent)
+    {
+        return Some(
+            "Bloom may already have sent it, so read status and check its hash on chain before creating a new intent".into(),
         );
     }
-    if denied {
-        return "check that the wallet policy allows this package and the transaction's target; Bloom's log has the reason".into();
+    let denied = error == "Bloom denied the transaction";
+    if !denied && error != "Bloom has not confirmed the transaction" {
+        return None;
     }
-    "Bloom could not prepare or send it, for example because its gas estimate reverts on an insufficient balance or allowance; Bloom's log has the reason".into()
+    if gone.is_some() {
+        return Some("Bloom discarded the entry unsent, as it does after a policy refusal, a refused approval or a ceremony limit; status shows the operation failed".into());
+    }
+    Some(
+        if denied {
+            "Bloom kept the entry: an owner approval it cannot use, an entry staged by another build, or a pending wallet-policy approval; inspect the outbox entry and the wallet's policy updates"
+        } else {
+            "Bloom gave no reason the Petal can show; inspect the outbox entry"
+        }
+        .into(),
+    )
 }
 
 /// Claims the outbox entry Bloom staged for step `index`. While an entry is

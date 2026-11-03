@@ -417,20 +417,28 @@ impl Host for Fake {
         if let Some(failure) = self.confirm_failure.take() {
             match failure {
                 "discard" | "denied-discard" => self.fail_entry(chain, id, "pending"),
-                "gap" => {
+                // Bloom writes its broadcast marker, then the submit fails.
+                "lost-send" => {
                     self.files.insert(
-                        outbox_path(chain, "pending", id, "nonce_gap.json"),
-                        json!({"blocked_by": [{"nonce": 0, "id": "9-tx"}]})
-                            .to_string()
-                            .into_bytes(),
+                        outbox_path(chain, "pending", id, "broadcast_attempted.json"),
+                        json!({"tx_hash": "0xlost"}).to_string().into_bytes(),
+                    );
+                }
+                "discard-sent" => {
+                    self.fail_entry(chain, id, "pending");
+                    self.files.insert(
+                        outbox_path(chain, "failed", id, "broadcast_attempted.json"),
+                        json!({"tx_hash": "0xmaybe"}).to_string().into_bytes(),
                     );
                 }
                 _ => {}
             }
-            if failure.starts_with("denied") {
-                return Err("Bloom denied the transaction".into());
-            }
-            return Err("Bloom has not confirmed the transaction".into());
+            return Err(match failure {
+                "denied" | "denied-discard" => "Bloom denied the transaction".into(),
+                // What BloomHost makes of a reason the SDK passes through.
+                "reason" => format!("Bloom has not confirmed the transaction: {NONCE_GAP}"),
+                _ => "Bloom has not confirmed the transaction".into(),
+            });
         }
         if !self.approved {
             return Ok(StagedTransaction {
@@ -1351,6 +1359,8 @@ const EXPIRED: &str = "quote expired; reconcile prior steps and create a new rev
 /// The expiry refusal for an operation whose staged step was never sent.
 const EXPIRED_STAGED: &str = "quote expired; reconcile prior steps and create a new reviewed intent; first discard its unsent outbox entry by writing `cancel` to /wallets/alice/0/chains/arbitrum/outbox/pending/1-tx/confirm";
 const TAMPERED: &str = "operation steps do not match the reviewed intent";
+/// Bloom 0.4.1's own text for a nonce gap, as the SDK passes it through.
+const NONCE_GAP: &str = "confirm EVM outbox: nonce gap: tx for 0x7e5f uses nonce 1 but the account's next on-chain nonce is 0 — the node would queue it behind the missing nonce(s) and it could never mine. Blocked by 9-tx (nonce 0). Broadcast the earlier transaction, or discard it and restage with the explicit missing `nonce`. Discarding alone does not renumber this transaction.";
 
 #[test]
 fn entries_bloom_never_sent_end_the_operation() {
@@ -2942,34 +2952,27 @@ fn a_refused_confirm_says_what_bloom_did() {
         h.confirm_failure = Some(failure);
         workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err()
     };
-    let prefix = "Bloom has not confirmed the transaction: ";
-    assert_eq!(
-        refusal("discard"),
-        format!(
-            "{prefix}Bloom discarded the entry unsent, as it does after a policy refusal, a refused approval or a ceremony limit; status shows the operation failed"
-        )
-    );
-    assert_eq!(
-        refusal("gap"),
-        format!(
-            "{prefix}Bloom holds it behind this account's earlier pending outbox entries 9-tx; finish or discard those first"
-        )
-    );
-    assert_eq!(
-        refusal("plain"),
-        format!(
-            "{prefix}Bloom could not prepare or send it, for example because its gas estimate reverts on an insufficient balance or allowance; Bloom's log has the reason"
-        )
-    );
-    // Bloom also denies a transaction its policy refuses.
+    let refused = "Bloom has not confirmed the transaction";
+    // Bloom's own reason stands, such as a nonce gap with its holders.
+    assert_eq!(refusal("reason"), format!("{refused}: {NONCE_GAP}"));
+    // A bare status: the step's own entry says what happened.
+    let discarded = "Bloom discarded the entry unsent, as it does after a policy refusal, a refused approval or a ceremony limit; status shows the operation failed";
+    assert_eq!(refusal("discard"), format!("{refused}: {discarded}"));
     assert_eq!(
         refusal("denied-discard"),
-        "Bloom denied the transaction: Bloom discarded the entry unsent, as it does after a policy refusal, a refused approval or a ceremony limit; status shows the operation failed"
+        format!("Bloom denied the transaction: {discarded}")
     );
     assert_eq!(
         refusal("denied"),
-        "Bloom denied the transaction: check that the wallet policy allows this package and the transaction's target; Bloom's log has the reason"
+        "Bloom denied the transaction: Bloom kept the entry: an owner approval it cannot use, an entry staged by another build, or a pending wallet-policy approval; inspect the outbox entry and the wallet's policy updates"
     );
+    assert_eq!(
+        refusal("plain"),
+        format!("{refused}: Bloom gave no reason the Petal can show; inspect the outbox entry")
+    );
+    // Never "not sent" when Bloom may have sent it.
+    let maybe = "Bloom may already have sent it, so read status and check its hash on chain before creating a new intent";
+    assert_eq!(refusal("discard-sent"), format!("{refused}: {maybe}"));
     // After a discard, status agrees.
     let mut h = Fake::default();
     staged_with_approval(&mut h);
@@ -2981,4 +2984,149 @@ fn a_refused_confirm_says_what_bloom_did() {
             .state,
         "failed"
     );
+}
+#[test]
+fn a_refusal_after_a_lost_reply_never_reads_as_unsent() {
+    // The submit reply was lost; Bloom then refuses the retry with its own
+    // reason, or a bare status.
+    for failure in ["reason", "plain"] {
+        let mut h = Fake::default();
+        staged_with_approval(&mut h);
+        h.files.insert(
+            outbox_path(ARB, "pending", "1-tx", "broadcast_attempted.json"),
+            json!({"tx_hash": "0xlost"}).to_string().into_bytes(),
+        );
+        h.confirm_failure = Some(failure);
+        let refusal =
+            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err();
+        assert!(
+            refusal.ends_with("Bloom may already have sent it, so read status and check its hash on chain before creating a new intent"),
+            "{failure}: {refusal}"
+        );
+    }
+}
+#[test]
+fn a_send_that_may_have_gone_out_is_never_called_unsent() {
+    let maybe = "Bloom may already have sent it, so read status and check its hash on chain before creating a new intent";
+    // Bloom attempts the send during this confirm, then reports a failure.
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.confirm_failure = Some("lost-send");
+    let refusal = workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err();
+    assert!(refusal.ends_with(maybe), "{refusal}");
+    // Later Bloom reports a lost reply's hash with no marker for the Petal.
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.outbox
+        .insert("1-tx".into(), ("pending".into(), Some("0xreported".into())));
+    h.confirm_failure = Some("plain");
+    let refusal = workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err();
+    assert!(refusal.ends_with(maybe), "{refusal}");
+}
+#[test]
+fn an_older_failed_entry_under_the_id_is_not_this_ones_discard() {
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.files.insert(
+        outbox_path(ARB, "failed", "1-tx", "intent.json"),
+        json!({"status": "pending", "created_ms": 5})
+            .to_string()
+            .into_bytes(),
+    );
+    h.confirm_failure = Some("plain");
+    assert_eq!(
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        "Bloom has not confirmed the transaction: Bloom gave no reason the Petal can show; inspect the outbox entry"
+    );
+}
+#[test]
+fn a_shared_entry_whose_challenge_cannot_be_read_offers_no_discard() {
+    for garbled in [false, true] {
+        let mut h = Fake {
+            dedupe: true,
+            ..Fake::default()
+        };
+        for id in ["one", "two"] {
+            workflow::create(&mut h, ARB, &account(), BUY, id, &body()).unwrap();
+        }
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+        let challenge = outbox_path(ARB, "pending", "1-tx", "approval_challenge.json");
+        if garbled {
+            h.files.insert(challenge, b"{not json".to_vec());
+        } else {
+            h.files.insert(challenge.clone(), b"{}".to_vec());
+            h.unreadable = Some(challenge);
+        }
+        let refusal =
+            workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm").unwrap_err();
+        assert!(!refusal.contains("`cancel`"), "{garbled}: {refusal}");
+        assert!(
+            refusal.contains("may have been sent or signed"),
+            "{garbled}: {refusal}"
+        );
+    }
+}
+#[test]
+fn a_cancel_marker_alone_in_sent_may_have_mined() {
+    // Bloom 0.4.1: a cancel whose submit reply was lost leaves only its marker.
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.send_entry(ARB, "1-tx", "sent", "0xone");
+    h.files.insert(
+        outbox_path(ARB, "sent", "1-tx", "cancel_broadcast_attempted.json"),
+        json!({"tx_hash": "0xcancel"}).to_string().into_bytes(),
+    );
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(d.state, "broadcast_unknown");
+    assert_eq!(d.steps[0].cancel_tx_hash.as_deref(), Some("0xcancel"));
+}
+#[test]
+fn a_refused_inspect_reads_a_fee_bump_and_clears_the_approval() {
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.send_entry(ARB, "1-tx", "sent", "0xone");
+    h.files.insert(
+        outbox_path(ARB, "sent", "1-tx", "replacement_tx_hash"),
+        b"0xbump\n".to_vec(),
+    );
+    h.inspect_refused = true;
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(d.state, "broadcast_unknown");
+    assert_eq!(d.steps[0].replacement_tx_hash.as_deref(), Some("0xbump"));
+    assert!(d.steps[0].approval.is_none());
+}
+#[test]
+fn a_zero_ceiling_refuses_even_a_redemption() {
+    // Pendle reports a few millionths of impact even for a matured
+    // redemption, so 0 bps refuses every trade; the README says so.
+    let r = redeem_market();
+    for (bps, refused) in [(0, true), (1, false)] {
+        let mut h = Fake {
+            expired: true,
+            market: r.clone(),
+            quote: redeem_quote(),
+            ..Fake::default()
+        };
+        let request = DraftInput {
+            market: r.address.clone(),
+            token: r.underlying_asset.address.clone(),
+            amount: "1000000000000000000".into(),
+            min_output: "1".into(),
+            slippage_bps: 10,
+            max_price_impact_bps: bps,
+        };
+        let created = workflow::create(
+            &mut h,
+            ETH,
+            &account(),
+            Operation::RedeemPt,
+            "one",
+            &serde_json::to_vec(&request).unwrap(),
+        );
+        assert_eq!(
+            created.err().as_deref(),
+            refused.then_some("price impact exceeds the requested ceiling"),
+            "{bps} bps"
+        );
+    }
 }

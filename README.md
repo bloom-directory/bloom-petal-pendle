@@ -59,7 +59,9 @@ Draft body (all amounts are decimal strings in base units):
 SY is supported directly. Other ERC-20s must be native inputs/outputs of that
 market's SY wrapper. Slippage is 1–100 bps; price impact ceiling is 0–300 bps.
 The ceiling bounds the size of the impact Pendle reports, which is negative
-for an adverse move.
+for an adverse move. Pendle reports a few bps even for small trades, and a
+few millionths for a matured redemption, so a ceiling under about 5 bps
+refuses most trades and 0 refuses every trade.
 PT maturity/redemption is expressed in the accounting asset, which can differ
 from the underlying asset. API APYs and expected amounts remain estimates.
 
@@ -106,13 +108,13 @@ insufficient. A nonzero insufficient allowance is reset first. Each write to
 `confirm.json` advances one step through Bloom's outbox. Complete the owner
 approval shown by Bloom, then retry the same path. Status exposes the outbox
 IDs so the owner can inspect pending approvals in the selected account.
-When Bloom refuses or denies a confirm, the error says what the outbox entry
-shows: Bloom discarded it unsent (a policy refusal, a refused approval or a
-ceremony limit), holds it behind earlier pending entries, or, for a denial,
-that the wallet policy should allow the package and the target; otherwise
-Bloom could not prepare it, for example because its gas estimate reverts on
-an insufficient balance. Bloom's own reason is only in its log: the Petal
-SDK passes a status, not a message.
+When Bloom refuses a confirm, the error carries Bloom's own reason, such as
+a nonce gap naming the entries that hold it, or a simulation revert. The
+Petal SDK reduces a reply that says "denied", "not found", "invalid" or
+"permission" to a bare status, as it does for a policy refusal or a refused
+approval; then the error says what the step's own outbox entry shows: Bloom
+discarded it unsent, or kept it. A refusal for a step Bloom may already have
+sent says so: check its hash on chain before creating a new intent.
 `status.json` is not cached: every read reconciles with the outbox and
 derives the operation's `state` from its steps. It is `prepared` or `staged`
 when the next `confirm` stages or sends a step, `approval_required` while an

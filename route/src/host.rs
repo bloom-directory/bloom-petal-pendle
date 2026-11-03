@@ -69,6 +69,19 @@ impl Host for BloomHost {
     }
     fn confirm(&mut self, wallet: &str, chain: Chain, id: &str) -> Result<StagedTransaction> {
         petal::sdk::tx_confirm(wallet, chain.name(), id, false).map_err(|error| match error {
+            // Bloom's own reason, unless the SDK reduced it to a status. Its
+            // advice to write `override` is for its own outbox, not this route.
+            petal::SdkError::Message(reason) => {
+                let reason = reason.strip_prefix("backend: ").unwrap_or(&reason);
+                let reason = reason
+                    .split(" — write 'override'")
+                    .next()
+                    .unwrap_or_default();
+                format!(
+                    "Bloom has not confirmed the transaction: {}",
+                    reason.chars().take(600).collect::<String>()
+                )
+            }
             petal::SdkError::Host(petal::HostStatus::Denied) => {
                 "Bloom denied the transaction".into()
             }
