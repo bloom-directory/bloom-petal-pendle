@@ -119,8 +119,10 @@ Bloom restarts, and only for an entry that holds the step's own
 transaction. When Bloom returns an entry another operation holds,
 `confirm` stages nothing for this one and says what to do: finish that
 operation, or discard the entry if Bloom cannot have sent or signed it;
-confirm that operation's route if it may have been sent; or check its hashes
-on chain if Bloom sent a replacement or cancel for it.
+finish that operation if the owner already approved it; wait for Bloom to
+expire the entry if its approval has ended; confirm that operation's route
+if it may have been sent; or check its hashes on chain if Bloom sent a
+replacement or cancel for it, or could not settle a lost reply.
 
 Discarding means writing `cancel` to the entry's `confirm` file in Bloom's
 outbox. Bloom 0.4.1 discards whatever is written there, and keeps its
@@ -167,10 +169,14 @@ intent: Bloom 0.4.1 never looks for a receipt for an entry in `failed/`, so
 even a cancelled send may have mined. Later Bloom keeps a cancelled send in
 its sent queue, and the step `submitted`, until one of the two mines; a mined
 cancel makes the step `failed`. Bloom 0.4.1 also leaves a send the owner
-sped up with `replace` in its sent queue and follows only the original
-hash, so a sent entry with `replacement_tx_hash` or
-`replacement_broadcast_attempted.json` is `broadcast_unknown`, showing both
-hashes, until Bloom records a receipt. An entry later Bloom reports
+sped up with `replace` in its sent queue, and can leave a cancelled send
+there when moving it fails, and follows only the original hash. So a sent
+entry with a replacement (`replacement_tx_hash`,
+`replacement_broadcast_attempted.json`) or a cancel (`cancel_tx_hash`,
+`cancel_broadcast_attempted.json`) is `broadcast_unknown`, showing the
+hashes, until Bloom records a receipt. Later Bloom follows both: a fee
+repair becomes the entry's own hash and a cancel reports `cancelling`, so
+those steps stay `submitted`. An entry later Bloom reports
 `signing_unknown`, released by an older Bloom although it may have been
 signed, is `broadcast_unknown`.
 
@@ -191,7 +197,9 @@ RPC; once the chain shows the transaction, writing `confirm` to the entry's
 Bloom reports the first entry it finds under an id, in `pending/`, then
 `sent/`, then `failed/`. When that entry's creation time is not the step's,
 the step reads its own entry in `sent/` or `failed/` instead, and is
-`broadcast_unknown` if it finds neither.
+`broadcast_unknown` if it finds neither. When Bloom refuses to report the
+id because another account's entry now holds it, the step reads its own
+entry the same way.
 
 `plan.md` reads the input and output decimals from the tokens onchain. Token
 symbols and the maturity date are Pendle's, printed without line breaks or
@@ -206,15 +214,17 @@ asked for the wallet-policy approval stops with the quote, and status shows
 `expired`. Expiry does not cancel a submitted transaction or revoke an
 allowance. An expired operation's unsent entry holds its nonce, blocking the
 account's later transactions, and Bloom hands it to an identical new intent
-until Bloom expires it an hour after staging. Discard it by writing `cancel`
-to `/wallets/<wallet>/<index>/chains/<chain>/outbox/pending/<id>/confirm`,
-as `confirm`'s refusal says. Later Bloom refuses to discard an entry that may
-have been signed. Reconcile previous steps before creating a fresh intent.
-Lost stage replies are `staging_unknown` and never restaged. When Bloom
-staged the entry but the Petal could not claim it, status shows the outbox
-id and the next `confirm` finishes the claim.
-A persisted writer lock after a crash requires operator inspection; locks are
-not silently expired. The Petal exposes no force-retry or force-unlock route.
+until Bloom expires it an hour after staging. When `confirm`'s refusal names
+it, discard it by writing `cancel` to
+`/wallets/<wallet>/<index>/chains/<chain>/outbox/pending/<id>/confirm`; when
+it does not, Bloom may have signed it, so the Petal names no discard. Later
+Bloom refuses to discard an entry that may have been signed. Reconcile
+previous steps before creating a fresh intent. Lost stage replies are
+`staging_unknown` and never restaged. When Bloom staged the entry but the
+Petal could not claim it, status shows the outbox id and the next `confirm`
+finishes the claim. A persisted writer lock after a crash requires operator
+inspection; locks are not silently expired. The Petal exposes no force-retry
+or force-unlock route.
 
 `execution_confirmed` means every step has a successful normalized Bloom
 receipt. It does not independently prove a quoted APY or output balance.

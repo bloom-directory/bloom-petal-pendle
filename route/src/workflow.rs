@@ -391,15 +391,57 @@ fn holds(intent: &Value, tx: &evm::Transaction) -> bool {
         && field("value_wei") == Some(tx.value.to_ascii_lowercase())
         && field("data_hex") == Some(tx.data.to_ascii_lowercase())
 }
-/// A sent entry's state from its own files, when it is this step's: Bloom
+/// A fee bump or cancel sent for a sent entry that Bloom does not follow.
+/// Bloom 0.4.1 follows only the entry's original hash, so a bump sent with
+/// `replace`, or a cancel it failed to move to `failed/`, may mine unseen.
+/// Bloom after 0.4.1 makes a fee repair the entry's own hash, and reports a
+/// cancel it follows as `cancelling`.
+struct Unfollowed {
+    replacement_tx_hash: Option<String>,
+    cancel_tx_hash: Option<String>,
+}
+fn sent_unfollowed<H: Host>(
+    host: &mut H,
+    account: &WalletAccount,
+    chain: Chain,
+    id: &str,
+    tx_hash: Option<&str>,
+    cancelling: bool,
+) -> Result<Option<Unfollowed>> {
+    let dir = outbox_entry(account, chain, "sent", id)?;
+    let mut read = |file: &str| host.vfs_file(&format!("{dir}/{file}"), 64 * 1024);
+    let bumped = read("replacement_tx_hash")?;
+    let bump_marker = read("replacement_broadcast_attempted.json")?;
+    let cancel = read("cancel_tx_hash")?;
+    let cancel_marker = read("cancel_broadcast_attempted.json")?;
+    let replacement_tx_hash =
+        text_hash(bumped.as_deref()).or_else(|| bump_marker.as_deref().and_then(recorded_hash));
+    let cancel_tx_hash =
+        text_hash(cancel.as_deref()).or_else(|| cancel_marker.as_deref().and_then(recorded_hash));
+    let bump_unfollowed = (bumped.is_some() || bump_marker.is_some())
+        && (replacement_tx_hash.is_none() || replacement_tx_hash.as_deref() != tx_hash);
+    let cancel_unfollowed = (cancel.is_some() || cancel_marker.is_some()) && !cancelling;
+    Ok(
+        (bump_unfollowed || cancel_unfollowed).then_some(Unfollowed {
+            replacement_tx_hash,
+            cancel_tx_hash,
+        }),
+    )
+}
+/// A sent entry read from its own files, when it is this step's: Bloom
 /// reports the first entry under a reused id, which may be another one.
+struct OwnSent {
+    state: &'static str,
+    tx_hash: Option<String>,
+    unfollowed: Option<Unfollowed>,
+}
 fn own_sent_entry<H: Host>(
     host: &mut H,
     account: &WalletAccount,
     chain: Chain,
     id: &str,
     created_ms: u64,
-) -> Result<Option<(&'static str, Option<String>)>> {
+) -> Result<Option<OwnSent>> {
     let dir = outbox_entry(account, chain, "sent", id)?;
     let Some(intent) = host.vfs_file(&format!("{dir}/intent.json"), 256 * 1024)? else {
         return Ok(None);
@@ -408,12 +450,50 @@ fn own_sent_entry<H: Host>(
     if intent["created_ms"].as_u64() != Some(created_ms) {
         return Ok(None);
     }
+    let tx_hash = intent["tx_hash"].as_str().map(String::from);
     let receipt = host.vfs_file(&format!("{dir}/receipt.json"), 64 * 1024)?;
-    let state = match receipt.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()) {
-        Some(receipt) => receipt_state(&receipt),
-        None => "submitted",
-    };
-    Ok(Some((state, intent["tx_hash"].as_str().map(String::from))))
+    if let Some(receipt) = receipt.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()) {
+        return Ok(Some(OwnSent {
+            state: receipt_state(&receipt),
+            tx_hash,
+            unfollowed: None,
+        }));
+    }
+    let unfollowed = sent_unfollowed(host, account, chain, id, tx_hash.as_deref(), false)?;
+    Ok(Some(OwnSent {
+        state: if unfollowed.is_some() {
+            "broadcast_unknown"
+        } else {
+            "submitted"
+        },
+        tx_hash,
+        unfollowed,
+    }))
+}
+/// Reads a step's own entry in `sent/` or `failed/` when Bloom reports
+/// another one or refuses to report it. Returns whether it found one.
+fn read_own_entry<H: Host>(
+    host: &mut H,
+    account: &WalletAccount,
+    chain: Chain,
+    id: &str,
+    created_ms: u64,
+    step: &mut Step,
+) -> Result<bool> {
+    if let Some(own) = own_sent_entry(host, account, chain, id, created_ms)? {
+        step.state = own.state.into();
+        step.tx_hash = own.tx_hash;
+        if let Some(unfollowed) = own.unfollowed {
+            step.replacement_tx_hash = unfollowed.replacement_tx_hash;
+            step.cancel_tx_hash = unfollowed.cancel_tx_hash;
+        }
+        return Ok(true);
+    }
+    if let Some(gone) = discarded(host, account, chain, id, Some(created_ms))? {
+        mark_discarded(step, gone, false);
+        return Ok(true);
+    }
+    Ok(false)
 }
 /// A step's state from Bloom's normalized receipt, which records its
 /// outcome explicitly.
@@ -515,15 +595,37 @@ fn unsent_entry<H: Host>(
     if !pending_attempts(host, account, chain, id)?.is_some_and(|attempts| attempts.unsent()) {
         return Ok(None);
     }
-    let dir = outbox_entry(account, chain, "pending", id)?;
-    // Bloom shows the approval's live state while the entry has one.
-    let awaiting = match host.vfs_file(&format!("{dir}/approval_challenge.json"), 64 * 1024) {
-        Ok(None) => !approved,
-        Ok(Some(challenge)) => serde_json::from_slice::<Value>(&challenge)
-            .is_ok_and(|challenge| challenge["state"] == "awaiting_ceremony"),
-        Err(_) => false,
+    let awaiting = match approval_state(host, account, chain, id)? {
+        None => !approved,
+        Some(state) => state == "awaiting_ceremony",
     };
-    Ok(awaiting.then(|| format!("/{dir}/confirm")))
+    Ok(awaiting
+        .then(|| outbox_entry(account, chain, "pending", id))
+        .transpose()?
+        .map(|dir| format!("/{dir}/confirm")))
+}
+/// The live state of a pending entry's owner approval, from
+/// `approval_challenge.json`, which Bloom shows while the entry has one:
+/// `None` without one, `unreadable` when it cannot be read.
+fn approval_state<H: Host>(
+    host: &mut H,
+    account: &WalletAccount,
+    chain: Chain,
+    id: &str,
+) -> Result<Option<String>> {
+    let dir = outbox_entry(account, chain, "pending", id)?;
+    Ok(
+        match host.vfs_file(&format!("{dir}/approval_challenge.json"), 64 * 1024) {
+            Ok(None) => None,
+            Ok(Some(challenge)) => Some(
+                serde_json::from_slice::<Value>(&challenge)
+                    .ok()
+                    .and_then(|challenge| challenge["state"].as_str().map(String::from))
+                    .unwrap_or_else(|| "unreadable".into()),
+            ),
+            Err(_) => Some("unreadable".into()),
+        },
+    )
 }
 /// The advice to discard a step's unsent entry first: until then it holds
 /// its nonce, and Bloom stages later transactions behind it.
@@ -634,18 +736,27 @@ pub fn reconcile<H: Host>(
             && reported_intent(host, account, chain, &id)?
                 .is_some_and(|intent| intent["created_ms"].as_u64() != Some(created))
         {
-            if let Some((state, hash)) = own_sent_entry(host, account, chain, &id, created)? {
-                step.state = state.into();
-                step.tx_hash = hash;
-            } else if let Some(gone) = discarded(host, account, chain, &id, Some(created))? {
-                mark_discarded(step, gone, false);
-            } else {
+            if !read_own_entry(host, account, chain, &id, created, step)? {
                 step.state = "broadcast_unknown".into();
             }
             step.approval = None;
             continue;
         }
-        let observed = host.inspect(account.wallet(), chain, &id)?;
+        let observed = match host.inspect(account.wallet(), chain, &id) {
+            Ok(observed) => observed,
+            // Bloom refuses to report an entry another account holds under
+            // a reused id: read this step's own instead.
+            Err(error) => {
+                let created = step.outbox_created_ms;
+                match created {
+                    Some(created) if read_own_entry(host, account, chain, &id, created, step)? => {
+                        step.approval = None;
+                        continue;
+                    }
+                    _ => return Err(error),
+                }
+            }
+        };
         step.tx_hash = observed.tx_hash;
         if let Some(receipt) = observed.receipt_json {
             let receipt: Value =
@@ -674,21 +785,24 @@ pub fn reconcile<H: Host>(
                 .into();
             }
         } else if step.tx_hash.is_some() || observed.state == "cancelling" {
-            // Sent: Bloom follows it, and after 0.4.1 its cancel or fee bump
-            // too, until one of them mines. Bloom 0.4.1 follows only the
-            // original hash, so a fee bump may mine unseen: check both.
-            let dir = outbox_entry(account, chain, "sent", &id)?;
-            let bumped = host.vfs_file(&format!("{dir}/replacement_tx_hash"), 1024)?;
-            let marker = host.vfs_file(
-                &format!("{dir}/replacement_broadcast_attempted.json"),
-                64 * 1024,
-            )?;
-            if bumped.is_some() || marker.is_some() {
-                step.replacement_tx_hash = text_hash(bumped.as_deref())
-                    .or_else(|| marker.as_deref().and_then(recorded_hash));
-                step.state = "broadcast_unknown".into();
-            } else {
-                step.state = "submitted".into();
+            // Sent: Bloom follows it, and after 0.4.1 its cancel or fee
+            // repair too, until one of them mines. Anything sent that Bloom
+            // cannot follow leaves its hashes to check on chain.
+            let cancelling = observed.state == "cancelling";
+            match sent_unfollowed(
+                host,
+                account,
+                chain,
+                &id,
+                step.tx_hash.as_deref(),
+                cancelling,
+            )? {
+                Some(unfollowed) => {
+                    step.replacement_tx_hash = unfollowed.replacement_tx_hash;
+                    step.cancel_tx_hash = unfollowed.cancel_tx_hash;
+                    step.state = "broadcast_unknown".into();
+                }
+                None => step.state = "submitted".into(),
             }
         } else if matches!(
             observed.state.as_str(),
@@ -939,14 +1053,31 @@ fn claim<H: Host>(
         .outbox_id
         .clone()
         .ok_or("outbox entry missing")?;
-    let intent = reported_intent(host, account, chain, &entry)?
-        .ok_or("Bloom's outbox entry cannot be read")?;
-    // An id Bloom reused after a restart may now name another entry.
-    if !holds(&intent, &draft.steps[index].transaction) {
-        return Err(format!(
-            "Bloom's outbox entry {entry} holds another transaction; inspect the account outbox before recovery"
-        ));
+    // An id Bloom reused after a restart may name another entry first, so
+    // the claim takes the first entry under it that holds this transaction.
+    let mut intent = None;
+    let mut seen = false;
+    for dir in ["pending", "sent", "failed"] {
+        let path = format!("{}/intent.json", outbox_entry(account, chain, dir, &entry)?);
+        let Some(bytes) = host.vfs_file(&path, 256 * 1024)? else {
+            continue;
+        };
+        seen = true;
+        let found = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
+        if holds(&found, &draft.steps[index].transaction) {
+            intent = Some(found);
+            break;
+        }
     }
+    let Some(intent) = intent else {
+        return Err(if seen {
+            format!(
+                "Bloom's outbox entry {entry} holds another transaction; inspect the account outbox before recovery"
+            )
+        } else {
+            "Bloom's outbox entry cannot be read".into()
+        });
+    };
     let created = intent["created_ms"]
         .as_u64()
         .ok_or("Bloom's outbox entry has no readable creation time")?;
@@ -972,12 +1103,28 @@ fn claim<H: Host>(
                     _ => holder.clone(),
                 };
                 let attempts = pending_attempts(host, account, chain, &entry)?;
+                let unsent = attempts.as_ref().is_some_and(Attempts::unsent);
+                let approval = if unsent {
+                    approval_state(host, account, chain, &entry)?
+                } else {
+                    None
+                };
                 let advice = match unsent_entry(host, account, chain, &entry, false)? {
                     Some(path) => format!(
                         "finish that operation, or discard the entry by writing `cancel` to {path}"
                     ),
                     None if attempts.is_some_and(|attempts| attempts.replaced || attempts.ambiguous) => {
                         "it may have been sent and Bloom no longer settles it: check its hashes on chain, as Bloom hands the entry out until it expires an hour after staging".into()
+                    }
+                    None if approval.as_deref() == Some("active") => format!(
+                        "the owner approved it, so finish that operation by writing `confirm` to {route}"
+                    ),
+                    None if matches!(
+                        approval.as_deref(),
+                        Some("expired" | "cancelled" | "refused")
+                    ) =>
+                    {
+                        "its owner approval has ended, and Bloom hands the entry out until it expires an hour after staging".into()
                     }
                     None => format!(
                         "it may have been sent or signed, so write `confirm` to {route} to let Bloom settle it"
