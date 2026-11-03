@@ -368,23 +368,82 @@ fn discarded<H: Host>(
     }))
 }
 
-/// The `created_ms` of the entry Bloom finds under `id`. Bloom looks in
-/// `pending/`, then `sent/`, then `failed/`, and so does this.
-fn reported_created_ms<H: Host>(
+/// The intent of the entry Bloom finds under `id`, `Null` when unreadable.
+/// Bloom looks in `pending/`, then `sent/`, then `failed/`, and so does this.
+fn reported_intent<H: Host>(
     host: &mut H,
     account: &WalletAccount,
     chain: Chain,
     id: &str,
-) -> Result<Option<u64>> {
+) -> Result<Option<Value>> {
     for dir in ["pending", "sent", "failed"] {
         let path = format!("{}/intent.json", outbox_entry(account, chain, dir, id)?);
         if let Some(intent) = host.vfs_file(&path, 256 * 1024)? {
-            return Ok(serde_json::from_slice::<Value>(&intent)
-                .ok()
-                .and_then(|intent| intent["created_ms"].as_u64()));
+            return Ok(Some(serde_json::from_slice(&intent).unwrap_or(Value::Null)));
         }
     }
     Ok(None)
+}
+/// Whether a Bloom intent holds exactly this transaction.
+fn holds(intent: &Value, tx: &evm::Transaction) -> bool {
+    let field = |name: &str| intent[name].as_str().map(str::to_ascii_lowercase);
+    field("to") == Some(tx.to.to_ascii_lowercase())
+        && field("value_wei") == Some(tx.value.to_ascii_lowercase())
+        && field("data_hex") == Some(tx.data.to_ascii_lowercase())
+}
+/// A sent entry's state from its own files, when it is this step's: Bloom
+/// reports the first entry under a reused id, which may be another one.
+fn own_sent_entry<H: Host>(
+    host: &mut H,
+    account: &WalletAccount,
+    chain: Chain,
+    id: &str,
+    created_ms: u64,
+) -> Result<Option<(&'static str, Option<String>)>> {
+    let dir = outbox_entry(account, chain, "sent", id)?;
+    let Some(intent) = host.vfs_file(&format!("{dir}/intent.json"), 256 * 1024)? else {
+        return Ok(None);
+    };
+    let intent: Value = serde_json::from_slice(&intent).unwrap_or(Value::Null);
+    if intent["created_ms"].as_u64() != Some(created_ms) {
+        return Ok(None);
+    }
+    let receipt = host.vfs_file(&format!("{dir}/receipt.json"), 64 * 1024)?;
+    let state = match receipt.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()) {
+        Some(receipt) => receipt_state(&receipt),
+        None => "submitted",
+    };
+    Ok(Some((state, intent["tx_hash"].as_str().map(String::from))))
+}
+/// A step's state from Bloom's normalized receipt, which records its
+/// outcome explicitly.
+fn receipt_state(receipt: &Value) -> &'static str {
+    match receipt["outcome"]
+        .as_str()
+        .or_else(|| receipt["status"].as_str())
+    {
+        Some("success") | Some("0x1") | Some("1") => "confirmed",
+        Some("reverted") | Some("0x0") | Some("0") => "reverted",
+        // Bloom after 0.4.1: the same-nonce cancel mined, so this
+        // transaction can never land.
+        Some("cancelled") => "failed",
+        _ => "submitted",
+    }
+}
+/// A step whose entry Bloom moved to `failed/`.
+fn mark_discarded(step: &mut Step, gone: Discarded, signing_unknown: bool) {
+    if !gone.maybe_sent && step.tx_hash.is_none() && !signing_unknown {
+        // Only an entry Bloom never tried to send is safe to abandon for a
+        // new intent.
+        step.state = "failed".into();
+    } else {
+        // Bloom never reconciles an entry in `failed/`, so even a cancelled
+        // send may have mined: check the hashes on chain.
+        step.tx_hash = step.tx_hash.take().or(gone.tx_hash);
+        step.cancel_tx_hash = gone.cancel_tx_hash;
+        step.replacement_tx_hash = gone.replacement_tx_hash;
+        step.state = "broadcast_unknown".into();
+    }
 }
 
 /// What a pending entry records of attempts to send it.
@@ -440,22 +499,31 @@ fn pending_attempts<H: Host>(
         ambiguous: ambiguous.is_some(),
     }))
 }
-/// The file that discards a pending entry, when Bloom never tried to send
-/// it. Bloom 0.4.1 discards whatever is written `cancel` there, so the
-/// Petal names it only for an entry with no send attempt.
+/// The file that discards a pending entry Bloom cannot have sent or signed.
+/// Bloom 0.4.1 discards whatever is written `cancel` there, and its signing
+/// state is private, so the Petal names it only for an entry with no send
+/// attempt whose owner approval, if any, still awaits its ceremony: once
+/// the owner approves, Bloom may be signing it. `approved` says this
+/// operation recorded a transaction approval for it.
 fn unsent_entry<H: Host>(
     host: &mut H,
     account: &WalletAccount,
     chain: Chain,
     id: &str,
+    approved: bool,
 ) -> Result<Option<String>> {
-    Ok(match pending_attempts(host, account, chain, id)? {
-        Some(attempts) if attempts.unsent() => Some(format!(
-            "/{}/confirm",
-            outbox_entry(account, chain, "pending", id)?
-        )),
-        _ => None,
-    })
+    if !pending_attempts(host, account, chain, id)?.is_some_and(|attempts| attempts.unsent()) {
+        return Ok(None);
+    }
+    let dir = outbox_entry(account, chain, "pending", id)?;
+    // Bloom shows the approval's live state while the entry has one.
+    let awaiting = match host.vfs_file(&format!("{dir}/approval_challenge.json"), 64 * 1024) {
+        Ok(None) => !approved,
+        Ok(Some(challenge)) => serde_json::from_slice::<Value>(&challenge)
+            .is_ok_and(|challenge| challenge["state"] == "awaiting_ceremony"),
+        Err(_) => false,
+    };
+    Ok(awaiting.then(|| format!("/{dir}/confirm")))
 }
 /// The advice to discard a step's unsent entry first: until then it holds
 /// its nonce, and Bloom stages later transactions behind it.
@@ -468,7 +536,10 @@ fn discard_first<H: Host>(
     let Some(id) = step.and_then(|step| step.outbox_id.clone()) else {
         return Ok(String::new());
     };
-    Ok(unsent_entry(host, account, chain, &id)?
+    let approved = step
+        .and_then(|step| step.approval.as_ref())
+        .is_some_and(|approval| approval.kind == "transaction");
+    Ok(unsent_entry(host, account, chain, &id, approved)?
         .map(|path| {
             format!("; first discard its unsent outbox entry by writing `cancel` to {path}")
         })
@@ -558,11 +629,19 @@ pub fn reconcile<H: Host>(
             continue;
         }
         // Outbox ids repeat after Bloom restarts, and Bloom reports the entry
-        // it finds first, which may be another one.
+        // it finds first, which may be another one: then read this step's.
         if let Some(created) = step.outbox_created_ms
-            && reported_created_ms(host, account, chain, &id)?.is_some_and(|found| found != created)
+            && reported_intent(host, account, chain, &id)?
+                .is_some_and(|intent| intent["created_ms"].as_u64() != Some(created))
         {
-            step.state = "broadcast_unknown".into();
+            if let Some((state, hash)) = own_sent_entry(host, account, chain, &id, created)? {
+                step.state = state.into();
+                step.tx_hash = hash;
+            } else if let Some(gone) = discarded(host, account, chain, &id, Some(created))? {
+                mark_discarded(step, gone, false);
+            } else {
+                step.state = "broadcast_unknown".into();
+            }
             step.approval = None;
             continue;
         }
@@ -571,31 +650,9 @@ pub fn reconcile<H: Host>(
         if let Some(receipt) = observed.receipt_json {
             let receipt: Value =
                 serde_json::from_str(&receipt).map_err(|_| "invalid outbox receipt")?;
-            // Bloom's normalized receipt records its outcome explicitly.
-            match receipt["outcome"]
-                .as_str()
-                .or_else(|| receipt["status"].as_str())
-            {
-                Some("success") | Some("0x1") | Some("1") => step.state = "confirmed".into(),
-                Some("reverted") | Some("0x0") | Some("0") => step.state = "reverted".into(),
-                // Bloom after 0.4.1: the same-nonce cancel mined, so this
-                // transaction can never land.
-                Some("cancelled") => step.state = "failed".into(),
-                _ => step.state = "submitted".into(),
-            }
+            step.state = receipt_state(&receipt).into();
         } else if let Some(gone) = discarded(host, account, chain, &id, step.outbox_created_ms)? {
-            if !gone.maybe_sent && step.tx_hash.is_none() && observed.state != "signing_unknown" {
-                // Only an entry Bloom never tried to send is safe to abandon
-                // for a new intent.
-                step.state = "failed".into();
-            } else {
-                // Bloom never reconciles an entry in `failed/`, so even a
-                // cancelled send may have mined: check the hashes on chain.
-                step.tx_hash = step.tx_hash.take().or(gone.tx_hash);
-                step.cancel_tx_hash = gone.cancel_tx_hash;
-                step.replacement_tx_hash = gone.replacement_tx_hash;
-                step.state = "broadcast_unknown".into();
-            }
+            mark_discarded(step, gone, observed.state == "signing_unknown");
         } else if let Some(attempts) = pending_attempts(host, account, chain, &id)? {
             step.tx_hash = step.tx_hash.take().or(attempts.sent.clone().flatten());
             if attempts.replaced || attempts.ambiguous || observed.state == "cancelling" {
@@ -617,9 +674,22 @@ pub fn reconcile<H: Host>(
                 .into();
             }
         } else if step.tx_hash.is_some() || observed.state == "cancelling" {
-            // Sent: Bloom follows it, and after 0.4.1 its cancel too, until
-            // one of them mines.
-            step.state = "submitted".into();
+            // Sent: Bloom follows it, and after 0.4.1 its cancel or fee bump
+            // too, until one of them mines. Bloom 0.4.1 follows only the
+            // original hash, so a fee bump may mine unseen: check both.
+            let dir = outbox_entry(account, chain, "sent", &id)?;
+            let bumped = host.vfs_file(&format!("{dir}/replacement_tx_hash"), 1024)?;
+            let marker = host.vfs_file(
+                &format!("{dir}/replacement_broadcast_attempted.json"),
+                64 * 1024,
+            )?;
+            if bumped.is_some() || marker.is_some() {
+                step.replacement_tx_hash = text_hash(bumped.as_deref())
+                    .or_else(|| marker.as_deref().and_then(recorded_hash));
+                step.state = "broadcast_unknown".into();
+            } else {
+                step.state = "submitted".into();
+            }
         } else if matches!(
             observed.state.as_str(),
             "failed" | "cancelled" | "signing_unknown"
@@ -627,8 +697,14 @@ pub fn reconcile<H: Host>(
             // Reported discarded, but not where Bloom keeps those.
             step.state = "broadcast_unknown".into();
         }
-        // An approval is pending only while an unsent entry waits for it.
-        if step.state != "staged" || step.tx_hash.is_some() {
+        // A transaction approval is pending only while an unsent entry
+        // waits for it. A wallet-policy approval may still be needed to let
+        // Bloom settle a lost reply.
+        let transaction = step
+            .approval
+            .as_ref()
+            .is_some_and(|approval| approval.kind == "transaction");
+        if step.state != "staged" || (step.tx_hash.is_some() && transaction) {
             step.approval = None;
         }
     }
@@ -767,15 +843,9 @@ fn advance<H: Host>(
             address(&draft.request.token)?,
         )?;
         // Operations spending the same token share the router's allowance,
-        // and one exact approval replaces another. Wait for another of this
-        // account's transactions on it to mine first.
-        if let Some(other) = allowance_in_flight(host, chain, account, op, id, &token)? {
-            return Err(format!(
-                "operation {other} has a transaction moving this token's router allowance in flight; confirm this one again once it has mined"
-            ));
-        }
-        // Never stage or send a Pendle transaction the mined allowance cannot
-        // cover, since it would revert.
+        // and one exact approval replaces another. Never stage or send a
+        // Pendle transaction the mined allowance cannot cover, since it would
+        // revert. A transaction still in flight is not counted.
         if index + 1 == draft.steps.len() {
             let allowance = evm::call(
                 host,
@@ -869,7 +939,16 @@ fn claim<H: Host>(
         .outbox_id
         .clone()
         .ok_or("outbox entry missing")?;
-    let created = reported_created_ms(host, account, chain, &entry)?
+    let intent = reported_intent(host, account, chain, &entry)?
+        .ok_or("Bloom's outbox entry cannot be read")?;
+    // An id Bloom reused after a restart may now name another entry.
+    if !holds(&intent, &draft.steps[index].transaction) {
+        return Err(format!(
+            "Bloom's outbox entry {entry} holds another transaction; inspect the account outbox before recovery"
+        ));
+    }
+    let created = intent["created_ms"]
+        .as_u64()
         .ok_or("Bloom's outbox entry has no readable creation time")?;
     let key = format!(
         "outbox-claims/{}/{}-{created}",
@@ -882,11 +961,27 @@ fn claim<H: Host>(
             Some(holder) if holder == mine.as_bytes() => {}
             Some(holder) => {
                 let holder = String::from_utf8_lossy(&holder).into_owned();
-                let advice = match unsent_entry(host, account, chain, &entry)? {
+                // The claim names `<op>/<id>/<step>`: confirm that operation.
+                let route = match holder.split('/').collect::<Vec<_>>()[..] {
+                    [kind, holder_id, _] => format!(
+                        "/petals/pendle/{}/{kind}/{}/{}/{holder_id}/confirm.json",
+                        chain.name(),
+                        account.wallet(),
+                        account.number()
+                    ),
+                    _ => holder.clone(),
+                };
+                let attempts = pending_attempts(host, account, chain, &entry)?;
+                let advice = match unsent_entry(host, account, chain, &entry, false)? {
                     Some(path) => format!(
                         "finish that operation, or discard the entry by writing `cancel` to {path}"
                     ),
-                    None => format!("it may have been sent, so confirm {holder} to settle it"),
+                    None if attempts.is_some_and(|attempts| attempts.replaced || attempts.ambiguous) => {
+                        "it may have been sent and Bloom no longer settles it: check its hashes on chain, as Bloom hands the entry out until it expires an hour after staging".into()
+                    }
+                    None => format!(
+                        "it may have been sent or signed, so write `confirm` to {route} to let Bloom settle it"
+                    ),
                 };
                 // Nothing of this operation is staged: try again once the
                 // other operation has finished.
@@ -905,58 +1000,6 @@ fn claim<H: Host>(
     draft.steps[index].state = "staged".into();
     settle(draft, host.now_ms());
     save(host, draft)
-}
-
-/// Another of this account's operations on `chain` with a transaction that
-/// moves `token`'s router allowance in flight: sent but not yet mined.
-fn allowance_in_flight<H: Host>(
-    host: &mut H,
-    chain: Chain,
-    account: &WalletAccount,
-    op: Operation,
-    id: &str,
-    token: &str,
-) -> Result<Option<String>> {
-    for other in [Operation::BuyPt, Operation::SellPt, Operation::RedeemPt] {
-        let prefix = prefix(chain, other);
-        for key in host.list(&prefix)? {
-            let Some(other_id) = key
-                .strip_prefix(prefix.as_str())
-                .and_then(|name| name.strip_suffix(".json"))
-            else {
-                continue;
-            };
-            if other == op && other_id == id {
-                continue;
-            }
-            let Some(record) = host.get(&key)? else {
-                continue;
-            };
-            let Ok(stored) = serde_json::from_slice::<Draft>(&record) else {
-                continue;
-            };
-            // Only a record with a step that may still be sent needs Bloom's
-            // view of it.
-            let open = stored.steps.iter().any(|step| {
-                step.outbox_id.is_some()
-                    && !matches!(step.state.as_str(), "confirmed" | "reverted" | "failed")
-            });
-            if !open || !stored.input_token.eq_ignore_ascii_case(token) {
-                continue;
-            }
-            // A record Bloom cannot report, such as one an earlier build
-            // staged, is left to the owner.
-            let Ok(current) = reconcile(host, chain, account, other, other_id) else {
-                continue;
-            };
-            if current.steps.iter().any(|step| {
-                step.state == "submitted" || (step.state == "staged" && step.tx_hash.is_some())
-            }) {
-                return Ok(Some(format!("{}/{other_id}", other.name())));
-            }
-        }
-    }
-    Ok(None)
 }
 
 /// A Pendle API string made safe to print in plan.md: at most 64 characters,

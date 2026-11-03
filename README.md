@@ -115,21 +115,28 @@ another for the same package, route, sender, target, value and calldata.
 Two drafts of the same intent, approvals of the same token and amount, and
 every allowance reset have the same calldata. So each operation claims the
 entries it stages, by outbox id and creation time, since ids repeat after
-Bloom restarts. When Bloom returns an entry another operation holds,
-`confirm` stages nothing for this one and names that operation and the
-entry. Finish that operation, or, if Bloom never tried to send the entry,
-discard it by writing `cancel` to its `confirm` file, then confirm this one
-again. Bloom 0.4.1 discards whatever is written `cancel` there, so the
-refusal names that file only for an entry with no send attempt.
+Bloom restarts, and only for an entry that holds the step's own
+transaction. When Bloom returns an entry another operation holds,
+`confirm` stages nothing for this one and says what to do: finish that
+operation, or discard the entry if Bloom cannot have sent or signed it;
+confirm that operation's route if it may have been sent; or check its hashes
+on chain if Bloom sent a replacement or cancel for it.
+
+Discarding means writing `cancel` to the entry's `confirm` file in Bloom's
+outbox. Bloom 0.4.1 discards whatever is written there, and keeps its
+signing state private, so the Petal names that file only for an entry with
+no send attempt whose owner approval, if any, still awaits its ceremony
+(`approval_challenge.json` in state `awaiting_ceremony`). Later Bloom
+refuses to discard an entry that may have been signed.
 
 Operations that spend the same token share the router's allowance, and one
-exact approval replaces another, so run them one at a time. `confirm` waits
-while another of the account's operations has a transaction on the same
-token in flight, and refuses to stage or send a Pendle transaction the mined
-allowance cannot cover, which would revert. Two `confirm` writes racing on
-different operations can still both pass. After such a refusal, discard the
-staged swap as the refusal says, then create a new intent: an entry left
-pending holds its nonce, and Bloom stages later transactions behind it.
+exact approval replaces another, so run them one at a time. `confirm`
+refuses to stage or send a Pendle transaction the mined allowance cannot
+cover, which would revert. It does not count a transaction still in flight,
+so a swap confirmed while another on the same token waits to mine can
+revert. After a refusal, discard the staged swap if the refusal says so,
+then create a new intent: an entry left pending holds its nonce, and Bloom
+stages later transactions behind it.
 
 When Bloom asks for an approval, the step's `approval` gives its action id,
 expiry and `kind`. A `transaction` approval is in the step's outbox entry. It
@@ -159,20 +166,32 @@ them, and `confirm` refuses it. Check both on chain before creating a new
 intent: Bloom 0.4.1 never looks for a receipt for an entry in `failed/`, so
 even a cancelled send may have mined. Later Bloom keeps a cancelled send in
 its sent queue, and the step `submitted`, until one of the two mines; a mined
-cancel makes the step `failed`. An entry later Bloom reports
+cancel makes the step `failed`. Bloom 0.4.1 also leaves a send the owner
+sped up with `replace` in its sent queue and follows only the original
+hash, so a sent entry with `replacement_tx_hash` or
+`replacement_broadcast_attempted.json` is `broadcast_unknown`, showing both
+hashes, until Bloom records a receipt. An entry later Bloom reports
 `signing_unknown`, released by an older Bloom although it may have been
 signed, is `broadcast_unknown`.
 
 A lost submit reply can also leave the broadcast marker in a pending entry.
 The step stays `staged`, showing the marker's hash, asks for no ceremony and
 never expires: the next `confirm` lets Bloom settle that attempt, without
-rechecking the market. A marker with no readable hash, a same-nonce
-replacement or cancel recorded in the pending entry (`replacement_tx_hash`,
-`cancel_tx_hash`), and Bloom's `reconcile_ambiguous.json`, written when it
-cannot settle the attempt, make the step `broadcast_unknown` instead: check
-the hashes on chain. Bloom reports the first entry it finds under an id, so
-a step whose entry's creation time differs from the one reported is
-`broadcast_unknown` too.
+rechecking the market. Only a transaction approval is cleared: a
+wallet-policy approval Bloom asks for to settle it stays shown. A marker
+with no readable hash, a same-nonce replacement or cancel recorded in the
+pending entry (`replacement_tx_hash`, `replacement_broadcast_attempted.json`,
+`cancel_tx_hash`, `cancel_broadcast_attempted.json`), and Bloom's
+`reconcile_ambiguous.json`, written when it cannot settle the attempt, make
+the step `broadcast_unknown` instead: check the hashes on chain. Bloom also
+writes `reconcile_ambiguous.json` for failures that pass, such as a slow
+RPC; once the chain shows the transaction, writing `confirm` to the entry's
+`confirm` file in Bloom's outbox lets Bloom settle it.
+
+Bloom reports the first entry it finds under an id, in `pending/`, then
+`sent/`, then `failed/`. When that entry's creation time is not the step's,
+the step reads its own entry in `sent/` or `failed/` instead, and is
+`broadcast_unknown` if it finds neither.
 
 `plan.md` reads the input and output decimals from the tokens onchain. Token
 symbols and the maturity date are Pendle's, printed without line breaks or

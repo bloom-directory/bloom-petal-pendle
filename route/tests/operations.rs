@@ -191,8 +191,13 @@ impl Fake {
             .files
             .remove(&outbox_path(chain, "pending", id, "intent.json"))
             .unwrap();
-        self.files
-            .insert(outbox_path(chain, "sent", id, "intent.json"), intent);
+        let mut intent: Value = serde_json::from_slice(&intent).unwrap();
+        intent["status"] = json!("sent");
+        intent["tx_hash"] = json!(hash);
+        self.files.insert(
+            outbox_path(chain, "sent", id, "intent.json"),
+            intent.to_string().into_bytes(),
+        );
     }
     /// When Bloom created a pending entry.
     fn created(&self, chain: Chain, id: &str) -> u64 {
@@ -325,14 +330,6 @@ impl Host for Fake {
     fn get(&mut self, key: &str) -> Result<Option<Vec<u8>>> {
         Ok(self.store.get(key).cloned())
     }
-    fn list(&mut self, prefix: &str) -> Result<Vec<String>> {
-        Ok(self
-            .store
-            .keys()
-            .filter(|key| key.starts_with(prefix))
-            .cloned()
-            .collect())
-    }
     fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {
         self.store.insert(key.into(), value.into());
         Ok(())
@@ -391,9 +388,12 @@ impl Host for Fake {
         let chain = if tx.chain == "ethereum" { ETH } else { ARB };
         self.files.insert(
             outbox_path(chain, "pending", &id, "intent.json"),
-            json!({"action_id": "pending-action", "status": "pending", "created_ms": self.now})
-                .to_string()
-                .into_bytes(),
+            json!({
+                "action_id": "pending-action", "status": "pending", "created_ms": self.now,
+                "to": tx.to, "value_wei": tx.value_wei, "data_hex": tx.data_hex,
+            })
+            .to_string()
+            .into_bytes(),
         );
         Ok(StagedTransaction {
             outbox_id: id,
@@ -2259,7 +2259,7 @@ fn a_refused_staged_swap_names_how_to_release_its_entry() {
 #[test]
 fn a_shared_entry_that_may_have_been_sent_is_never_offered_for_discard() {
     // "one" sent its approval, but the reply was lost; "two" approves the
-    // same token and amount, and would be handed one's pending entry.
+    // same token and amount, and Bloom hands it one's pending entry.
     let mut h = Fake {
         dedupe: true,
         ..Fake::default()
@@ -2272,22 +2272,18 @@ fn a_shared_entry_that_may_have_been_sent_is_never_offered_for_discard() {
         outbox_path(ARB, "pending", "1-tx", "broadcast_attempted.json"),
         json!({"tx_hash": "0xfeed"}).to_string().into_bytes(),
     );
-    // It waits for one's approval, which may be in flight.
-    assert!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm")
-            .unwrap_err()
-            .starts_with("operation buy-pt/one has a transaction")
-    );
-    assert_eq!(h.staged.len(), 1);
-    // Where the wait cannot see "one", the claim still offers no discard.
-    let key = "operations/arbitrum/buy-pt/one.json";
-    let mut record: Value = serde_json::from_slice(&h.store[key]).unwrap();
-    record["input_token"] = json!(OWNER);
-    h.store
-        .insert(key.into(), serde_json::to_vec(&record).unwrap());
     assert_eq!(
         workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm").unwrap_err(),
-        "Bloom returned pending outbox entry 1-tx of operation buy-pt/one/0; it may have been sent, so confirm buy-pt/one/0 to settle it, then confirm this one again"
+        "Bloom returned pending outbox entry 1-tx of operation buy-pt/one/0; it may have been sent or signed, so write `confirm` to /petals/pendle/arbitrum/buy-pt/alice/0/one/confirm.json to let Bloom settle it, then confirm this one again"
+    );
+    // A replacement Bloom keeps pending is no longer Bloom's to settle.
+    h.files.insert(
+        outbox_path(ARB, "pending", "1-tx", "replacement_tx_hash"),
+        b"0xrepl".to_vec(),
+    );
+    assert_eq!(
+        workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm").unwrap_err(),
+        "Bloom returned pending outbox entry 1-tx of operation buy-pt/one/0; it may have been sent and Bloom no longer settles it: check its hashes on chain, as Bloom hands the entry out until it expires an hour after staging, then confirm this one again"
     );
 }
 #[test]
@@ -2365,43 +2361,7 @@ fn a_lost_reply_after_an_approval_asks_for_no_ceremony() {
     assert_eq!(h.mined, BTreeSet::from(["1-tx".into()]));
 }
 #[test]
-fn a_transaction_in_flight_on_the_same_token_holds_the_next() {
-    let mut h = Fake {
-        approved: true,
-        ..Fake::default()
-    };
-    for id in ["one", "two"] {
-        workflow::create(&mut h, ARB, &account(), BUY, id, &body()).unwrap();
-    }
-    let confirm =
-        |h: &mut Fake, id: &str| workflow::confirm(h, ARB, &account(), BUY, id, b"confirm");
-    confirm(&mut h, "one").unwrap(); // stage one's approval
-    // Bloom sends it; it has not mined.
-    h.send_entry(ARB, "1-tx", "sent", "0xone");
-    let refused = "operation buy-pt/one has a transaction moving this token's router allowance in flight; confirm this one again once it has mined";
-    assert_eq!(confirm(&mut h, "two").unwrap_err(), refused);
-    assert_eq!(h.staged.len(), 1);
-    // A lost reply may be in flight too.
-    let mut h = Fake::default();
-    for id in ["one", "two"] {
-        workflow::create(&mut h, ARB, &account(), BUY, id, &body()).unwrap();
-    }
-    confirm(&mut h, "one").unwrap();
-    h.files.insert(
-        outbox_path(ARB, "pending", "1-tx", "broadcast_attempted.json"),
-        json!({"tx_hash": "0xone"}).to_string().into_bytes(),
-    );
-    assert_eq!(confirm(&mut h, "two").unwrap_err(), refused);
-    // Once it has mined, the next goes ahead. Other tokens never wait.
-    h.receipts.insert(
-        "1-tx".into(),
-        json!({"outcome": "success", "tx_hash": "0xone"}),
-    );
-    confirm(&mut h, "two").unwrap();
-    assert_eq!(h.staged.len(), 2);
-}
-#[test]
-fn bloom_reporting_another_entry_under_a_reused_id_is_not_trusted() {
+fn a_step_under_a_reused_id_reads_its_own_entry() {
     // This step's entry expired into failed/, while an older entry under the
     // same id sits in sent/ with a receipt; Bloom reports the older one.
     let mut h = Fake::default();
@@ -2418,7 +2378,61 @@ fn bloom_reporting_another_entry_under_a_reused_id_is_not_trusted() {
         json!({"outcome": "success", "tx_hash": "0xold"}),
     );
     let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!((d.state.as_str(), &d.steps[0].tx_hash), ("failed", &None));
+    // A finished step whose id a newer pending entry reuses keeps its own
+    // receipt.
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.send_entry(ARB, "1-tx", "sent", "0xmine");
+    h.files.insert(
+        outbox_path(ARB, "sent", "1-tx", "receipt.json"),
+        json!({"outcome": "success", "tx_hash": "0xmine"})
+            .to_string()
+            .into_bytes(),
+    );
+    h.files.insert(
+        outbox_path(ARB, "pending", "1-tx", "intent.json"),
+        json!({"status": "pending", "created_ms": 5})
+            .to_string()
+            .into_bytes(),
+    );
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(
+        (d.steps[0].state.as_str(), d.steps[0].tx_hash.as_deref()),
+        ("confirmed", Some("0xmine"))
+    );
+    // Neither found: Bloom reports another entry, and this one is unknown.
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.files.insert(
+        outbox_path(ARB, "pending", "1-tx", "intent.json"),
+        json!({"status": "pending", "created_ms": 5})
+            .to_string()
+            .into_bytes(),
+    );
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
     assert_eq!(d.state, "broadcast_unknown");
+}
+#[test]
+fn a_resumed_claim_never_adopts_another_transaction() {
+    // The claim failed; meanwhile the id names an entry with other calldata.
+    let mut h = Fake {
+        claim_fault: Some("fail"),
+        ..Fake::default()
+    };
+    workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+    h.files.insert(
+        outbox_path(ARB, "pending", "1-tx", "intent.json"),
+        json!({"status": "pending", "created_ms": 5, "to": ROUTER, "value_wei": "0", "data_hex": "0xdead"})
+            .to_string()
+            .into_bytes(),
+    );
+    assert_eq!(
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        "Bloom's outbox entry 1-tx holds another transaction; inspect the account outbox before recovery"
+    );
+    assert!(h.store.keys().all(|k| !k.starts_with("outbox-claims/")));
 }
 #[test]
 fn a_hash_on_a_step_with_no_entry_means_nothing() {
@@ -2474,4 +2488,127 @@ fn an_unfinished_claim_resumes_on_the_next_confirm() {
         "staging outcome unknown; inspect the account outbox before recovery"
     );
     assert_eq!(h.staged.len(), 1);
+}
+#[test]
+fn an_approval_on_a_step_with_no_entry_means_nothing() {
+    let mut h = Fake::default();
+    workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
+    let key = "operations/arbitrum/buy-pt/one.json";
+    let mut record: Value = serde_json::from_slice(&h.store[key]).unwrap();
+    record["steps"][0]["approval"] =
+        json!({"action_id": "pending-action", "expires_ms": 9_999_999u64, "kind": "transaction"});
+    h.store
+        .insert(key.into(), serde_json::to_vec(&record).unwrap());
+    h.now += 300_001;
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!((d.state.as_str(), &d.steps[0].approval), ("expired", &None));
+    assert_eq!(
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        EXPIRED
+    );
+    assert!(h.staged.is_empty());
+}
+#[test]
+fn a_pending_cancel_marker_may_have_gone_out() {
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.files.insert(
+        outbox_path(ARB, "pending", "1-tx", "broadcast_attempted.json"),
+        json!({"tx_hash": "0xswap"}).to_string().into_bytes(),
+    );
+    h.files.insert(
+        outbox_path(ARB, "pending", "1-tx", "cancel_broadcast_attempted.json"),
+        json!({"tx_hash": "0xcancel"}).to_string().into_bytes(),
+    );
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(d.state, "broadcast_unknown");
+    assert_eq!(d.steps[0].cancel_tx_hash.as_deref(), Some("0xcancel"));
+}
+#[test]
+fn a_pending_entry_wins_over_an_older_sent_entry_under_its_id() {
+    // Bloom reads pending/ before sent/, so this step's pending entry is
+    // the one Bloom reports.
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.files.insert(
+        outbox_path(ARB, "sent", "1-tx", "intent.json"),
+        json!({"status": "sent", "tx_hash": "0xold", "created_ms": 999})
+            .to_string()
+            .into_bytes(),
+    );
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(d.state, "approval_required");
+}
+#[test]
+fn a_fee_bumped_send_may_mine_under_its_replacement() {
+    // Bloom 0.4.1 leaves a replaced sent entry in sent/ and follows only
+    // the original hash; later Bloom records the receipt of whichever mines.
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.send_entry(ARB, "1-tx", "sent", "0xone");
+    h.files.insert(
+        outbox_path(ARB, "sent", "1-tx", "replacement_tx_hash"),
+        b"0xrepl".to_vec(),
+    );
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(d.state, "broadcast_unknown");
+    assert_eq!(
+        (
+            d.steps[0].tx_hash.as_deref(),
+            d.steps[0].replacement_tx_hash.as_deref()
+        ),
+        (Some("0xone"), Some("0xrepl"))
+    );
+    h.receipts.insert(
+        "1-tx".into(),
+        json!({"outcome": "success", "tx_hash": "0xrepl"}),
+    );
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(d.steps[0].state, "confirmed");
+}
+#[test]
+fn a_wallet_policy_approval_for_a_lost_reply_stays_visible() {
+    let mut h = Fake {
+        approval_action: "policy-update".into(),
+        ..Fake::default()
+    };
+    staged_with_approval(&mut h);
+    h.files.insert(
+        outbox_path(ARB, "pending", "1-tx", "broadcast_attempted.json"),
+        json!({"tx_hash": "0xswap"}).to_string().into_bytes(),
+    );
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(d.state, "approval_required");
+    assert_eq!(d.steps[0].approval.as_ref().unwrap().kind, "wallet_policy");
+}
+#[test]
+fn a_discard_is_offered_only_while_the_approval_awaits_its_ceremony() {
+    // The owner granted the transaction approval, then confirm failed: Bloom
+    // may have started signing, which only Bloom can see.
+    let refused_after = |challenge: Option<&str>| {
+        let mut h = Fake {
+            allowance: U256::MAX,
+            ..Fake::default()
+        };
+        workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+        if let Some(state) = challenge {
+            h.files.insert(
+                outbox_path(ARB, "pending", "1-tx", "approval_challenge.json"),
+                json!({"state": state}).to_string().into_bytes(),
+            );
+        }
+        h.allowance = U256::ZERO;
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err()
+    };
+    let hint = "; first discard its unsent outbox entry by writing `cancel` to /wallets/alice/0/chains/arbitrum/outbox/pending/1-tx/confirm";
+    assert!(refused_after(Some("awaiting_ceremony")).ends_with(hint));
+    for challenge in [None, Some("active"), Some("exhausted"), Some("unknown")] {
+        let refusal = refused_after(challenge);
+        assert!(
+            refusal.ends_with("create a new reviewed intent"),
+            "{challenge:?}: {refusal}"
+        );
+    }
 }

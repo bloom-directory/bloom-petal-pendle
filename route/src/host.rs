@@ -10,8 +10,6 @@ pub trait Host {
     fn vfs_file(&mut self, path: &str, max: usize) -> Result<Option<Vec<u8>>>;
     fn chain(&mut self, chain: Chain, method: &str, params: &str) -> Result<String>;
     fn get(&mut self, key: &str) -> Result<Option<Vec<u8>>>;
-    /// The store keys under `prefix`.
-    fn list(&mut self, prefix: &str) -> Result<Vec<String>>;
     fn put(&mut self, key: &str, value: &[u8]) -> Result<()>;
     fn put_new(&mut self, key: &str, value: &[u8]) -> Result<()>;
     fn delete_if(&mut self, key: &str, value: &[u8]) -> Result<()>;
@@ -51,9 +49,6 @@ impl Host for BloomHost {
             Err(petal::SdkError::Host(petal::HostStatus::NotFound)) => Ok(None),
             Err(_) => Err("operation store read failed".into()),
         }
-    }
-    fn list(&mut self, prefix: &str) -> Result<Vec<String>> {
-        petal::sdk::store_list(prefix, 1024 * 1024).map_err(|_| "operation listing failed".into())
     }
     fn put(&mut self, key: &str, value: &[u8]) -> Result<()> {
         petal::sdk::store_put(key, value, false).map_err(|_| "operation store write failed".into())
