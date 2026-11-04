@@ -4,6 +4,6 @@ petal::route_file!(
     write: |ctx: &petal::Ctx,body: &[u8]| { let (chain,account)=match pendle_route::selected(ctx) { Ok(a)=>a,Err(e)=>return e };
     let id=match petal::param(ctx,"id") { Ok(v)=>v,Err(e)=>return e };
     let op=pendle_route::Operation::RedeemPt;
-        pendle_route::written(pendle_route::workflow::confirm(&mut pendle_route::host::BloomHost,chain,&account,op,id,body))
+        pendle_route::written(pendle_route::workflow::confirm(&mut pendle_route::host::BloomHost,chain,&account,op,id,body,&ctx.package_hash))
     }
 );

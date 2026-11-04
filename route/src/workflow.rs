@@ -30,14 +30,19 @@ pub struct Step {
     pub approval: Option<Approval>,
 }
 /// Bloom's pending owner approval: its action id, when it expires, and what
-/// it approves. `transaction` is this step's outbox entry; `wallet_policy`
-/// adds this package to the wallet policy; `unknown` could not be told apart.
+/// it approves. `transaction` is this step's outbox entry; `wallet_policy` is
+/// the wallet's pending policy update; `unknown` could not be told apart.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Approval {
     pub action_id: String,
     pub expires_ms: u64,
     #[serde(default)]
     pub kind: String,
+    /// For a `wallet_policy` approval, this package's hash. Bloom hands back
+    /// any pending update, and a Petal can read neither the update nor the
+    /// wallet policy, so the owner checks on the ceremony page what it changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
 }
 pub const SCHEMA: &str = "bloom.pendle.operation.v2";
 
@@ -539,6 +544,12 @@ struct Attempts {
     cancel_tx_hash: Option<String>,
     /// Bloom could not settle a lost submit reply.
     ambiguous: bool,
+    /// Bloom recorded why, and it resends the same signed transaction only
+    /// after a failed public resubmit. For any other reason (the nonce moved
+    /// past it, another transaction holds the nonce, a private relay, or a
+    /// policy now asking for private routing) it refuses every confirm until
+    /// the hash shows on chain.
+    stuck: bool,
 }
 impl Attempts {
     fn unsent(&self) -> bool {
@@ -578,6 +589,16 @@ fn pending_attempts<H: Host>(
             .or_else(|| replacement.as_deref().and_then(recorded_hash)),
         cancel_tx_hash: text_hash(cancel_hash.as_deref())
             .or_else(|| cancel.as_deref().and_then(recorded_hash)),
+        stuck: ambiguous.as_deref().is_some_and(|ambiguous| {
+            !serde_json::from_slice::<Value>(ambiguous)
+                .ok()
+                .and_then(|ambiguous| {
+                    ambiguous["reason"]
+                        .as_str()
+                        .map(|reason| reason.starts_with("public resubmit failed:"))
+                })
+                .unwrap_or(false)
+        }),
         ambiguous: ambiguous.is_some(),
     }))
 }
@@ -690,7 +711,7 @@ fn settle(draft: &mut Draft, now_ms: u64) {
 }
 
 /// A transaction approval carries its outbox entry's action id. The only
-/// other approval a confirm asks for adds this package to the wallet policy.
+/// other approval a confirm asks for is the wallet's pending policy update.
 fn approval_kind<H: Host>(
     host: &mut H,
     account: &WalletAccount,
@@ -768,17 +789,18 @@ pub fn reconcile<H: Host>(
             mark_discarded(step, gone, observed.state == "signing_unknown");
         } else if let Some(attempts) = pending_attempts(host, account, chain, &id)? {
             step.tx_hash = step.tx_hash.take().or(attempts.sent.clone().flatten());
-            if attempts.replaced || attempts.ambiguous || observed.state == "cancelling" {
-                // A same-nonce replacement or cancel went out, or Bloom could
-                // not settle a lost reply. Bloom keeps the entry pending and
+            if attempts.replaced || attempts.stuck || observed.state == "cancelling" {
+                // A same-nonce replacement or cancel went out, or Bloom will
+                // not resend a lost reply. Bloom keeps the entry pending and
                 // never settles it by itself: check the hashes on chain.
                 step.cancel_tx_hash = attempts.cancel_tx_hash;
                 step.replacement_tx_hash = attempts.replacement_tx_hash;
                 step.state = "broadcast_unknown".into();
             } else if attempts.sent.is_some() || step.tx_hash.is_some() {
-                // A lost submit reply. Bloom settles that attempt when confirm
-                // is written again, so the step stays confirmable, quote or
-                // not; without a readable hash it may simply have gone out.
+                // A lost submit reply, or a resend that failed. Bloom settles
+                // or resends that attempt when confirm is written again, so
+                // the step stays confirmable, quote or not; without a
+                // readable hash it may simply have gone out.
                 step.state = if step.tx_hash.is_some() {
                     "staged"
                 } else {
@@ -835,6 +857,7 @@ pub fn confirm<H: Host>(
     op: Operation,
     id: &str,
     body: &[u8],
+    package: &str,
 ) -> Result<()> {
     if body != b"confirm" {
         return Err("write exactly 'confirm' to advance one reviewed outbox step".into());
@@ -842,7 +865,7 @@ pub fn confirm<H: Host>(
     let lock = lock_key(chain, op, id)?;
     let token = format!("{}:{}", account.wallet(), host.now_ms()).into_bytes();
     host.put_new(&lock, &token)?;
-    let result = advance(host, chain, account, op, id);
+    let result = advance(host, chain, account, op, id, package);
     let released = host.delete_if(&lock, &token);
     result.and(released)
 }
@@ -852,6 +875,7 @@ fn advance<H: Host>(
     account: &WalletAccount,
     op: Operation,
     id: &str,
+    package: &str,
 ) -> Result<()> {
     let mut draft = reconcile(host, chain, account, op, id)?;
     match draft.state.as_str() {
@@ -880,10 +904,17 @@ fn advance<H: Host>(
             );
         }
         "failed" => {
-            return Err(
-                "Bloom refused, cancelled or expired an outbox step that can no longer land; reconcile prior steps and create a new reviewed intent"
-                    .into(),
-            );
+            let refused = draft
+                .steps
+                .iter()
+                .find(|step| step.state == "failed")
+                .and_then(|step| step.outbox_id.clone())
+                .and_then(|id| policy_refusals(host, account, chain, &id))
+                .map(|reasons| format!(". Bloom's policy refused it: {reasons}"))
+                .unwrap_or_default();
+            return Err(format!(
+                "Bloom refused, cancelled or expired an outbox step that can no longer land; reconcile prior steps and create a new reviewed intent{refused}"
+            ));
         }
         "submitted" => return Err("transaction submitted; poll status before advancing".into()),
         // An expired quote stages nothing new. Only a step whose transaction
@@ -988,10 +1019,28 @@ fn advance<H: Host>(
                 // broadcast. Keep the same step confirmable after ceremony.
                 if let Some(approval) = outcome.approval {
                     let kind = approval_kind(host, account, chain, &outbox_id, &approval.action_id);
+                    // Bloom hands back a pending wallet-policy update before
+                    // it looks at the entry. The step keeps the transaction
+                    // approval Bloom asked for, which lets it continue after
+                    // the quote expires.
+                    let requested = draft.steps[index]
+                        .approval
+                        .as_ref()
+                        .is_some_and(|approval| approval.kind == "transaction");
+                    if kind == "wallet_policy" && requested {
+                        settle(&mut draft, host.now_ms());
+                        save(host, &draft)?;
+                        return Err(format!(
+                            "Bloom asks for wallet-policy update {}, under /wallets/{}/policy-updates/pending/, before it uses this step's transaction approval; approve or cancel that update on its page, wait a few seconds after a cancel, then confirm again",
+                            approval.action_id,
+                            account.wallet()
+                        ));
+                    }
                     draft.steps[index].approval = Some(Approval {
                         action_id: approval.action_id,
                         expires_ms: approval.expires_ms,
                         kind: kind.into(),
+                        package: (kind == "wallet_policy").then(|| package.to_owned()),
                     });
                     draft.steps[index].state = "staged".into();
                 } else {
@@ -1010,6 +1059,13 @@ fn advance<H: Host>(
                 let step = draft.steps[index].clone();
                 match refusal_detail(host, account, chain, &step, &error) {
                     Some(detail) => Err(format!("{error}: {detail}")),
+                    // No pending entry holds the missing nonce, so this one
+                    // can never be sent, and it holds its own nonce for
+                    // every later transaction until it is discarded.
+                    None if crate::host::unheld_nonce(&error).is_some() => {
+                        let discard = discard_first(host, account, chain, Some(&step))?;
+                        Err(format!("{error}{discard}"))
+                    }
                     None => Err(error),
                 }
             }
@@ -1056,7 +1112,19 @@ fn refusal_detail<H: Host>(
     let gone = discarded(host, account, chain, id, step.outbox_created_ms)
         .ok()
         .flatten();
-    if step.tx_hash.is_some()
+    // Bloom may move an entry to `sent/` and still report an error.
+    let sent = outbox_entry(account, chain, "sent", id)
+        .and_then(|dir| host.vfs_file(&format!("{dir}/intent.json"), 256 * 1024))
+        .ok()
+        .flatten()
+        .is_some_and(|intent| {
+            let created = serde_json::from_slice::<Value>(&intent)
+                .ok()
+                .and_then(|intent| intent["created_ms"].as_u64());
+            step.outbox_created_ms.is_none() || created == step.outbox_created_ms
+        });
+    if sent
+        || step.tx_hash.is_some()
         || attempts.as_ref().is_some_and(|attempts| !attempts.unsent())
         || gone.as_ref().is_some_and(|gone| gone.maybe_sent)
     {
@@ -1069,16 +1137,50 @@ fn refusal_detail<H: Host>(
         return None;
     }
     if gone.is_some() {
-        return Some("Bloom discarded the entry unsent, as it does after a policy refusal, a refused approval or a ceremony limit; status shows the operation failed".into());
+        return Some(match policy_refusals(host, account, chain, id) {
+            Some(reasons) => format!(
+                "Bloom's policy refused it and discarded the entry unsent: {reasons}; status shows the operation failed"
+            ),
+            None => "Bloom discarded the entry unsent, as it does after a policy refusal, a refused approval or a ceremony limit; status shows the operation failed".into(),
+        });
     }
     Some(
         if denied {
-            "Bloom kept the entry: an owner approval it cannot use, an entry staged by another build, or a pending wallet-policy approval; inspect the outbox entry and the wallet's policy updates"
+            "Bloom kept the entry. It denies without discarding when this route may not use it (an entry staged by another build or another account, a missing write permit, an unavailable outbox, or a Broker eligibility failure), when a wallet-policy approval is pending, or when an owner approval cannot be used; inspect the outbox entry and the wallet's policy updates"
         } else {
             "Bloom gave no reason the Petal can show; inspect the outbox entry"
         }
         .into(),
     )
+}
+
+/// The hard policy refusals Bloom recorded for an entry it discarded, such
+/// as an account with no native token for gas.
+fn policy_refusals<H: Host>(
+    host: &mut H,
+    account: &WalletAccount,
+    chain: Chain,
+    id: &str,
+) -> Option<String> {
+    let dir = outbox_entry(account, chain, "failed", id).ok()?;
+    let checks = host
+        .vfs_file(&format!("{dir}/policy_check.json"), 64 * 1024)
+        .ok()
+        .flatten()?;
+    let checks: Value = serde_json::from_slice(&checks).ok()?;
+    let refused: Vec<String> = checks
+        .as_array()?
+        .iter()
+        .filter(|check| check["outcome"] == "deny")
+        .filter_map(|check| {
+            Some(format!(
+                "{}: {}",
+                check["rule"].as_str()?,
+                check["message"].as_str()?
+            ))
+        })
+        .collect();
+    (!refused.is_empty()).then(|| crate::host::bloom_reason(&refused.join("; ")))
 }
 
 /// Claims the outbox entry Bloom staged for step `index`. While an entry is
@@ -1161,7 +1263,7 @@ fn claim<H: Host>(
                     Some(path) => format!(
                         "finish that operation, or discard the entry by writing `cancel` to {path}"
                     ),
-                    None if attempts.is_some_and(|attempts| attempts.replaced || attempts.ambiguous) => {
+                    None if attempts.is_some_and(|attempts| attempts.replaced || attempts.stuck) => {
                         "it may have been sent and Bloom no longer settles it: check its hashes on chain, as Bloom hands the entry out until it expires an hour after staging".into()
                     }
                     None if approval.as_deref() == Some("active") => format!(

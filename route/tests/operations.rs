@@ -249,7 +249,18 @@ impl Host for Fake {
         Ok(OWNER.as_bytes().to_vec())
     }
     fn vfs_file(&mut self, path: &str, max: usize) -> Result<Option<Vec<u8>>> {
-        if self.unreadable.as_deref() == Some(path) {
+        // Bloom lets a Petal read only its numbered account under a wallet,
+        // never the wallet's policy or policy updates.
+        let selected = account();
+        let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        let outside = match segments.as_slice() {
+            ["wallets", wallet, number, ..] => {
+                *wallet != selected.wallet() || *number != selected.number().to_string()
+            }
+            ["wallets" | "petals", ..] => true,
+            _ => false,
+        };
+        if outside || self.unreadable.as_deref() == Some(path) {
             return Err("outbox entry read failed".into());
         }
         Ok(self.files.get(path).map(|bytes| {
@@ -424,6 +435,10 @@ impl Host for Fake {
                         json!({"tx_hash": "0xlost"}).to_string().into_bytes(),
                     );
                 }
+                "sent-then-error" => {
+                    self.send_entry(chain, id, "sent", "0xsent");
+                    self.outbox.remove(id);
+                }
                 "discard-sent" => {
                     self.fail_entry(chain, id, "pending");
                     self.files.insert(
@@ -436,7 +451,8 @@ impl Host for Fake {
             return Err(match failure {
                 "denied" | "denied-discard" => "Bloom denied the transaction".into(),
                 // What BloomHost makes of a reason the SDK passes through.
-                "reason" => format!("Bloom has not confirmed the transaction: {NONCE_GAP}"),
+                "reason" => host::confirm_refusal(&petal::SdkError::Message(NONCE_GAP.into())),
+                "unheld-gap" => host::confirm_refusal(&petal::SdkError::Message(UNHELD_GAP.into())),
                 _ => "Bloom has not confirmed the transaction".into(),
             });
         }
@@ -649,8 +665,8 @@ fn lost_stage_reply_never_creates_a_second_outbox() {
     let mut h = Fake::default();
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
     h.lose_stage = true;
-    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
-    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).is_err());
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).is_err());
     assert_eq!(h.staged.len(), 1);
     assert_eq!(
         workflow::load(&mut h, ARB, &account(), BUY, "one")
@@ -663,8 +679,8 @@ fn lost_stage_reply_never_creates_a_second_outbox() {
 fn approval_retries_reuse_the_same_outbox_id() {
     let mut h = Fake::default();
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     assert_eq!(
         workflow::load(&mut h, ARB, &account(), BUY, "one")
             .unwrap()
@@ -673,16 +689,16 @@ fn approval_retries_reuse_the_same_outbox_id() {
     );
     assert_eq!(h.staged.len(), 1);
     h.approved = true;
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     assert_eq!(h.staged.len(), 1);
 }
 #[test]
 fn expired_quote_and_wrong_confirmation_do_not_stage() {
     let mut h = Fake::default();
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
-    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"yes").is_err());
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"yes", PKG).is_err());
     h.now += 300_001;
-    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).is_err());
     assert!(h.staged.is_empty());
 }
 #[test]
@@ -690,16 +706,16 @@ fn an_approval_requested_before_expiry_can_finish_after_it() {
     let mut h = Fake::default();
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
     // Stage the token approval and request the owner's approval.
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     // The owner finishes the ceremony after the quote has expired.
     h.now += 300_001;
     h.approved = true;
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     assert_eq!(h.mined, BTreeSet::from(["1-tx".into()]));
     // The swap is not staged from the expired quote.
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
         "quote expired; reconcile prior steps and create a new reviewed intent"
     );
     assert_eq!(h.staged.len(), 1);
@@ -709,9 +725,9 @@ fn an_expired_quote_requests_no_new_approval() {
     let mut h = Fake::default();
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
     // Staged, but the owner's approval has not been requested yet.
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     h.now += 300_001;
-    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).is_err());
     assert!(h.confirms.is_empty());
 }
 #[test]
@@ -756,7 +772,7 @@ fn concurrent_or_crashed_writer_lock_refuses_execution() {
         workflow::lock_key(ARB, BUY, "one").unwrap(),
         b"crashed writer".to_vec(),
     );
-    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).is_err());
     assert!(h.staged.is_empty());
 }
 #[test]
@@ -954,13 +970,13 @@ fn ethereum_draft_uses_chain_one_end_to_end() {
     assert!(plan.contains("(PT-reUSD-10DEC2026, 6 decimals)"), "{plan}");
 
     // Stage the approval, request the owner's approval, then broadcast it.
-    workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm").unwrap();
-    workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm", PKG).unwrap();
+    workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm", PKG).unwrap();
     h.approved = true;
-    workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm", PKG).unwrap();
     // With the approval mined, stage the swap and broadcast it.
-    workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm").unwrap();
-    workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm", PKG).unwrap();
+    workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm", PKG).unwrap();
     let d = workflow::reconcile(&mut h, ETH, &account(), BUY, "one").unwrap();
     assert_eq!(d.state, "execution_confirmed");
     assert_eq!(h.staged.len(), 2);
@@ -1062,7 +1078,7 @@ fn a_draft_is_invisible_from_another_chain() {
         workflow::load(&mut h, ETH, &account(), BUY, "one").unwrap_err(),
         "operation not found"
     );
-    assert!(workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm").is_err());
+    assert!(workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm", PKG).is_err());
     assert!(h.staged.is_empty());
 }
 #[test]
@@ -1093,7 +1109,7 @@ fn tampered_records_are_refused() {
             "persisted operation does not belong to the selected chain",
             "{key} {field}"
         );
-        assert!(workflow::confirm(&mut h, chain, &account(), BUY, "one", b"confirm").is_err());
+        assert!(workflow::confirm(&mut h, chain, &account(), BUY, "one", b"confirm", PKG).is_err());
         assert!(h.staged.is_empty());
     }
 }
@@ -1146,7 +1162,7 @@ fn an_rpc_on_the_wrong_chain_is_refused() {
     let mut h = Fake::ethereum();
     workflow::create(&mut h, ETH, &account(), BUY, "one", &eth_body()).unwrap();
     h.chain_id = Some(42161);
-    assert!(workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm").is_err());
+    assert!(workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm", PKG).is_err());
     assert!(h.staged.is_empty());
 }
 
@@ -1350,17 +1366,22 @@ fn redeem_quote() -> Value {
 /// Stage the first step of a buy and have Bloom ask for its approval.
 fn staged_with_approval(h: &mut Fake) {
     workflow::create(h, ARB, &account(), BUY, "one", &body()).unwrap();
-    workflow::confirm(h, ARB, &account(), BUY, "one", b"confirm").unwrap();
-    workflow::confirm(h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
+    workflow::confirm(h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
 }
 const NEVER_SENT: &str = "Bloom refused, cancelled or expired an outbox step that can no longer land; reconcile prior steps and create a new reviewed intent";
 const MAYBE_SENT: &str = "Bloom no longer sends an outbox step but may have broadcast it; check its hash on chain before creating a new intent";
 const EXPIRED: &str = "quote expired; reconcile prior steps and create a new reviewed intent";
 /// The expiry refusal for an operation whose staged step was never sent.
 const EXPIRED_STAGED: &str = "quote expired; reconcile prior steps and create a new reviewed intent; first discard its unsent outbox entry by writing `cancel` to /wallets/alice/0/chains/arbitrum/outbox/pending/1-tx/confirm";
+/// The package hash the confirm routes pass from their context.
+const PKG: &str = petal::testing::PACKAGE_HASH;
 const TAMPERED: &str = "operation steps do not match the reviewed intent";
+/// Bloom 0.4.1's nonce gap when no pending entry holds the missing nonce:
+/// the entry that held it was discarded, refused or expired.
+const UNHELD_GAP: &str = "backend: confirm EVM outbox: nonce gap: tx for 0x7e5f uses nonce 1 but the account's next on-chain nonce is 0 — the node would queue it behind the missing nonce(s) and it could never mine. Broadcast the earlier transaction, or discard it and restage with the explicit missing `nonce`. Discarding alone does not renumber this transaction.";
 /// Bloom 0.4.1's own text for a nonce gap, as the SDK passes it through.
-const NONCE_GAP: &str = "confirm EVM outbox: nonce gap: tx for 0x7e5f uses nonce 1 but the account's next on-chain nonce is 0 — the node would queue it behind the missing nonce(s) and it could never mine. Blocked by 9-tx (nonce 0). Broadcast the earlier transaction, or discard it and restage with the explicit missing `nonce`. Discarding alone does not renumber this transaction.";
+const NONCE_GAP: &str = "backend: confirm EVM outbox: nonce gap: tx for 0x7e5f uses nonce 1 but the account's next on-chain nonce is 0 — the node would queue it behind the missing nonce(s) and it could never mine. Nonce 0 is held by staged transaction 9-tx. Broadcast the earlier transaction, or discard it and restage with the explicit missing `nonce`. Discarding alone does not renumber this transaction.";
 
 #[test]
 fn entries_bloom_never_sent_end_the_operation() {
@@ -1380,7 +1401,7 @@ fn entries_bloom_never_sent_end_the_operation() {
         assert_eq!(d.steps[0].approval, None);
         let confirms = h.confirms.len();
         assert_eq!(
-            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
             NEVER_SENT
         );
         // Nothing is confirmed again and nothing new is staged.
@@ -1389,7 +1410,7 @@ fn entries_bloom_never_sent_end_the_operation() {
     // With a transaction hash it may have been broadcast: keep waiting.
     let mut h = Fake::default();
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     h.send_entry(ARB, "1-tx", "failed", "0xdef");
     let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
     assert_eq!(d.steps[0].state, "submitted");
@@ -1442,7 +1463,8 @@ fn entries_bloom_may_have_broadcast_are_never_abandoned() {
             assert_eq!(d.steps[0].approval, None, "{case}");
             let confirms = h.confirms.len();
             assert_eq!(
-                workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+                workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG)
+                    .unwrap_err(),
                 MAYBE_SENT,
                 "{case}"
             );
@@ -1489,7 +1511,7 @@ fn a_cancelled_send_may_still_have_mined() {
     assert!(shown["steps"][1].get("cancel_tx_hash").is_none());
     let confirms = h.confirms.len();
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
         MAYBE_SENT
     );
     assert_eq!((h.confirms.len(), h.staged.len()), (confirms, 1));
@@ -1507,7 +1529,7 @@ fn an_unreadable_outbox_entry_is_an_error_not_a_guess() {
             "{file}"
         );
         let confirms = h.confirms.len();
-        assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+        assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).is_err());
         assert_eq!((h.confirms.len(), h.staged.len()), (confirms, 1), "{file}");
     }
 }
@@ -1537,6 +1559,7 @@ fn status_names_the_pending_owner_approval() {
             action_id: "pending-action".into(),
             expires_ms: h.now + 60_000,
             kind: "transaction".into(),
+            package: None,
         })
     );
     let shown = serde_json::to_value(&d).unwrap();
@@ -1544,7 +1567,7 @@ fn status_names_the_pending_owner_approval() {
     assert!(shown["steps"][1].get("approval").is_none());
     // Once Bloom broadcasts the step, the approval is gone.
     h.approved = true;
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
     assert_eq!(d.steps[0].approval, None);
     // Any other action id is the wallet-policy approval for this package.
@@ -1559,15 +1582,15 @@ fn status_names_the_pending_owner_approval() {
     // Petal names no discard for an entry it cannot read.
     let mut h = Fake::default();
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     h.files
         .remove(&outbox_path(ARB, "pending", "1-tx", "intent.json"));
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
     assert_eq!(d.steps[0].approval.as_ref().unwrap().kind, "unknown");
     h.now += 300_001;
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
         EXPIRED
     );
 }
@@ -1576,9 +1599,9 @@ fn only_a_requested_transaction_approval_outlives_the_quote() {
     // A host error is not an approval request.
     let mut h = Fake::default();
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     h.fail_confirm = true;
-    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).is_err());
     let d = workflow::load(&mut h, ARB, &account(), BUY, "one").unwrap();
     assert_eq!(
         (d.state.as_str(), d.steps[0].approval.is_none()),
@@ -1587,7 +1610,7 @@ fn only_a_requested_transaction_approval_outlives_the_quote() {
     h.now += 300_001;
     let confirms = h.confirms.len();
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
         EXPIRED_STAGED
     );
     assert_eq!(h.confirms.len(), confirms);
@@ -1601,7 +1624,7 @@ fn only_a_requested_transaction_approval_outlives_the_quote() {
     h.now += 300_001;
     let confirms = h.confirms.len();
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
         EXPIRED_STAGED
     );
     assert_eq!(h.confirms.len(), confirms);
@@ -1619,7 +1642,7 @@ fn only_a_requested_transaction_approval_outlives_the_quote() {
         .insert(key.into(), serde_json::to_vec(&record).unwrap());
     h.now += 300_001;
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
         EXPIRED_STAGED
     );
 
@@ -1628,7 +1651,7 @@ fn only_a_requested_transaction_approval_outlives_the_quote() {
     let mut h = Fake::default();
     staged_with_approval(&mut h);
     h.fail_confirm = true;
-    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).is_err());
     assert_eq!(
         workflow::load(&mut h, ARB, &account(), BUY, "one")
             .unwrap()
@@ -1637,7 +1660,7 @@ fn only_a_requested_transaction_approval_outlives_the_quote() {
     );
     h.now += 300_001;
     h.approved = true;
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     assert_eq!(h.mined, BTreeSet::from(["1-tx".into()]));
 }
 #[test]
@@ -1690,7 +1713,7 @@ fn tampered_operation_steps_are_refused() {
         h.store
             .insert(key.into(), serde_json::to_vec(&record).unwrap());
         assert_eq!(
-            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").err(),
+            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).err(),
             Some(TAMPERED.to_string()),
             "{case}"
         );
@@ -1757,7 +1780,7 @@ fn approval_steps_rebuild_for_every_operation() {
             .len();
         // Each step stages, then broadcasts; approvals first, as built.
         for _ in 0..steps * 2 {
-            workflow::confirm(&mut h, chain, &account(), op, "one", b"confirm").unwrap();
+            workflow::confirm(&mut h, chain, &account(), op, "one", b"confirm", PKG).unwrap();
         }
         assert_eq!(
             workflow::reconcile(&mut h, chain, &account(), op, "one")
@@ -1815,7 +1838,7 @@ fn two_operations_never_share_an_outbox_entry() {
         workflow::create(&mut h, ARB, &account(), BUY, id, &body()).unwrap();
     }
     let confirm =
-        |h: &mut Fake, id: &str| workflow::confirm(h, ARB, &account(), BUY, id, b"confirm");
+        |h: &mut Fake, id: &str| workflow::confirm(h, ARB, &account(), BUY, id, b"confirm", PKG);
     let status = |h: &mut Fake, id: &str| workflow::reconcile(h, ARB, &account(), BUY, id).unwrap();
     confirm(&mut h, "one").unwrap();
     assert_eq!(
@@ -1872,7 +1895,7 @@ fn a_swap_whose_allowance_was_spent_is_refused() {
         workflow::create(&mut h, ARB, &account(), BUY, id, &body()).unwrap();
     }
     let confirm =
-        |h: &mut Fake, id: &str| workflow::confirm(h, ARB, &account(), BUY, id, b"confirm");
+        |h: &mut Fake, id: &str| workflow::confirm(h, ARB, &account(), BUY, id, b"confirm", PKG);
     confirm(&mut h, "one").unwrap(); // stage one's approval
     confirm(&mut h, "one").unwrap(); // send it
     confirm(&mut h, "two").unwrap(); // stage two's approval
@@ -1912,18 +1935,18 @@ fn the_operation_state_follows_its_steps() {
     let mut h = Fake::default();
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
     assert_eq!(state(&mut h), "prepared");
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     assert_eq!(state(&mut h), "staged");
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     assert_eq!(state(&mut h), "approval_required");
     h.approved = true;
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     // The approval mined and nothing is in flight: the swap is next.
     assert_eq!(state(&mut h), "prepared");
     h.now += 300_001;
     assert_eq!(state(&mut h), "expired");
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
         EXPIRED
     );
 
@@ -1931,7 +1954,7 @@ fn the_operation_state_follows_its_steps() {
     // whose transaction approval Bloom requested does not.
     let mut h = Fake::default();
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     h.now += 300_001;
     assert_eq!(state(&mut h), "expired");
     for (action, expired) in [
@@ -1974,7 +1997,7 @@ fn step_states_win_over_expiry() {
     let mut h = Fake::default();
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
     h.lose_stage = true;
-    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).is_err());
     h.now += 300_001;
     assert_eq!(
         workflow::reconcile(&mut h, ARB, &account(), BUY, "one")
@@ -1994,7 +2017,7 @@ fn step_states_win_over_expiry() {
     );
     let confirms = h.confirms.len();
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
         "transaction submitted; poll status before advancing"
     );
     assert_eq!(h.confirms.len(), confirms);
@@ -2016,7 +2039,7 @@ fn a_reverted_receipt_ends_the_operation() {
         );
         let confirms = h.confirms.len();
         assert_eq!(
-            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
             "operation requires reconciliation or manual recovery; it cannot be resubmitted"
         );
         assert_eq!((h.confirms.len(), h.staged.len()), (confirms, 1));
@@ -2079,7 +2102,7 @@ fn bloom_after_0_4_1_signing_unknown_may_have_been_sent() {
         let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
         assert_eq!(d.state, "broadcast_unknown", "{state} {marked}");
         assert_eq!(
-            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
             MAYBE_SENT
         );
     }
@@ -2097,7 +2120,7 @@ fn bloom_after_0_4_1_cancelling_waits_for_a_receipt() {
         ("submitted", "submitted")
     );
     let confirms = h.confirms.len();
-    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).is_err());
     assert_eq!(h.confirms.len(), confirms);
     // A pending one, possibly signed but with no hash, is never settled.
     let mut h = Fake::default();
@@ -2148,7 +2171,7 @@ fn a_send_whose_reply_was_lost_stays_confirmable() {
         h.approved = true;
         h.allowance = U256::ZERO;
         let confirms = h.confirms.len();
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
         assert_eq!(h.confirms.len(), confirms + 1, "{case}");
     }
     // A swap that may have mined spent its own allowance: Bloom still
@@ -2165,7 +2188,7 @@ fn a_send_whose_reply_was_lost_stays_confirmable() {
     );
     h.allowance = U256::ZERO;
     h.approved = true;
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     assert_eq!(h.mined, BTreeSet::from(["1-tx".into()]));
     // A marker with no readable hash may still have gone out.
     let mut h = Fake::default();
@@ -2188,16 +2211,16 @@ fn an_expired_operation_names_how_to_release_its_entry() {
         ..Fake::default()
     };
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     h.now += 300_001;
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
         EXPIRED_STAGED
     );
     // The new intent finds the unsent entry until it is discarded.
     workflow::create(&mut h, ARB, &account(), BUY, "two", &body()).unwrap();
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm", PKG).unwrap_err(),
         shared("1-tx", "buy-pt/one/0")
     );
     // Writing `cancel` makes Bloom discard it unsent.
@@ -2208,7 +2231,7 @@ fn an_expired_operation_names_how_to_release_its_entry() {
             .state,
         "failed"
     );
-    workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm", PKG).unwrap();
     let two = workflow::reconcile(&mut h, ARB, &account(), BUY, "two").unwrap();
     assert_eq!(two.steps[0].outbox_id.as_deref(), Some("2-tx"));
 }
@@ -2220,7 +2243,7 @@ fn claims_survive_lost_replies_and_refuse_store_errors() {
         ..Fake::default()
     };
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
     assert_eq!(
         (d.state.as_str(), d.steps[0].outbox_id.as_deref()),
@@ -2234,7 +2257,7 @@ fn claims_survive_lost_replies_and_refuse_store_errors() {
     };
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
         "store unavailable"
     );
     let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
@@ -2243,7 +2266,7 @@ fn claims_survive_lost_replies_and_refuse_store_errors() {
         ("staging_unknown", Some("1-tx"))
     );
     // The next confirm claims it without staging again.
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
     assert_eq!((d.state.as_str(), h.staged.len()), ("staged", 1));
     // An outbox id that is not Bloom's form goes into no key.
@@ -2253,7 +2276,7 @@ fn claims_survive_lost_replies_and_refuse_store_errors() {
     };
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
         "Bloom returned an unexpected outbox id"
     );
     assert!(h.store.keys().all(|k| !k.starts_with("outbox-claims/")));
@@ -2288,10 +2311,10 @@ fn a_refused_staged_swap_names_how_to_release_its_entry() {
         ..Fake::default()
     };
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     h.allowance = U256::ZERO;
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
         "the router may spend 0 of the input token, less than this operation's 1000000000000000000: another operation spent or replaced its approval; create a new reviewed intent; first discard its unsent outbox entry by writing `cancel` to /wallets/alice/0/chains/arbitrum/outbox/pending/1-tx/confirm"
     );
 }
@@ -2306,13 +2329,13 @@ fn a_shared_entry_that_may_have_been_sent_is_never_offered_for_discard() {
     for id in ["one", "two"] {
         workflow::create(&mut h, ARB, &account(), BUY, id, &body()).unwrap();
     }
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     h.files.insert(
         outbox_path(ARB, "pending", "1-tx", "broadcast_attempted.json"),
         json!({"tx_hash": "0xfeed"}).to_string().into_bytes(),
     );
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm", PKG).unwrap_err(),
         "Bloom returned pending outbox entry 1-tx of operation buy-pt/one/0; it may have been sent or signed, so write `confirm` to /petals/pendle/arbitrum/buy-pt/alice/0/one/confirm.json to let Bloom settle it, then confirm this one again"
     );
     // A replacement Bloom keeps pending is no longer Bloom's to settle.
@@ -2321,19 +2344,15 @@ fn a_shared_entry_that_may_have_been_sent_is_never_offered_for_discard() {
         b"0xrepl".to_vec(),
     );
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm", PKG).unwrap_err(),
         "Bloom returned pending outbox entry 1-tx of operation buy-pt/one/0; it may have been sent and Bloom no longer settles it: check its hashes on chain, as Bloom hands the entry out until it expires an hour after staging, then confirm this one again"
     );
 }
 #[test]
 fn a_send_bloom_cannot_settle_or_that_was_replaced_may_have_gone_out() {
-    // Bloom could not settle a lost reply, or sent a same-nonce replacement
-    // or cancel, and keeps the entry pending.
+    // Bloom sent a same-nonce replacement or cancel and keeps the entry
+    // pending.
     for (file, bytes) in [
-        (
-            "reconcile_ambiguous.json",
-            json!({"reason": "nonce advanced"}).to_string(),
-        ),
         ("replacement_tx_hash", "0xrepl".to_owned()),
         (
             "replacement_broadcast_attempted.json",
@@ -2365,7 +2384,7 @@ fn a_send_bloom_cannot_settle_or_that_was_replaced_may_have_gone_out() {
         }
         let confirms = h.confirms.len();
         assert_eq!(
-            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
             MAYBE_SENT,
             "{file}"
         );
@@ -2396,7 +2415,7 @@ fn a_lost_reply_after_an_approval_asks_for_no_ceremony() {
     // The market may have matured since: confirm still lets Bloom settle it.
     h.expired = true;
     h.approved = true;
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     assert_eq!(h.mined, BTreeSet::from(["1-tx".into()]));
 }
 #[test]
@@ -2460,7 +2479,7 @@ fn a_resumed_claim_never_adopts_another_transaction() {
         ..Fake::default()
     };
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
-    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).is_err());
     h.files.insert(
         outbox_path(ARB, "pending", "1-tx", "intent.json"),
         json!({"status": "pending", "created_ms": 5, "to": ROUTER, "value_wei": "0", "data_hex": "0xdead"})
@@ -2468,7 +2487,7 @@ fn a_resumed_claim_never_adopts_another_transaction() {
             .into_bytes(),
     );
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
         "Bloom's outbox entry 1-tx holds another transaction; inspect the account outbox before recovery"
     );
     assert!(h.store.keys().all(|k| !k.starts_with("outbox-claims/")));
@@ -2486,7 +2505,7 @@ fn a_hash_on_a_step_with_no_entry_means_nothing() {
     let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
     assert_eq!((d.state.as_str(), &d.steps[0].tx_hash), ("expired", &None));
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
         EXPIRED
     );
     assert!(h.staged.is_empty());
@@ -2500,7 +2519,7 @@ fn an_unfinished_claim_resumes_on_the_next_confirm() {
     };
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
         "outbox entry read failed"
     );
     h.unreadable = None;
@@ -2511,7 +2530,7 @@ fn an_unfinished_claim_resumes_on_the_next_confirm() {
     );
     // Meanwhile Bloom sent it: the claim reads its intent from sent/.
     h.send_entry(ARB, "1-tx", "sent", "0xone");
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
     assert_eq!((d.state.as_str(), h.staged.len()), ("submitted", 1));
     assert!(h.store.contains_key("outbox-claims/arbitrum/1-tx-1000000"));
@@ -2521,9 +2540,9 @@ fn an_unfinished_claim_resumes_on_the_next_confirm() {
         ..Fake::default()
     };
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
-    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).is_err());
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
         "staging outcome unknown; inspect the account outbox before recovery"
     );
     assert_eq!(h.staged.len(), 1);
@@ -2542,7 +2561,7 @@ fn an_approval_on_a_step_with_no_entry_means_nothing() {
     let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
     assert_eq!((d.state.as_str(), &d.steps[0].approval), ("expired", &None));
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
         EXPIRED
     );
     assert!(h.staged.is_empty());
@@ -2630,8 +2649,8 @@ fn a_discard_is_offered_only_while_the_approval_awaits_its_ceremony() {
             ..Fake::default()
         };
         workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
         if let Some(state) = challenge {
             h.files.insert(
                 outbox_path(ARB, "pending", "1-tx", "approval_challenge.json"),
@@ -2639,7 +2658,7 @@ fn a_discard_is_offered_only_while_the_approval_awaits_its_ceremony() {
             );
         }
         h.allowance = U256::ZERO;
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err()
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err()
     };
     let hint = "; first discard its unsent outbox entry by writing `cancel` to /wallets/alice/0/chains/arbitrum/outbox/pending/1-tx/confirm";
     assert!(refused_after(Some("awaiting_ceremony")).ends_with(hint));
@@ -2658,12 +2677,12 @@ fn resumed_claim(edit: impl Fn(&mut Value)) -> std::result::Result<(), String> {
         ..Fake::default()
     };
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
-    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).is_err());
     let path = outbox_path(ARB, "pending", "1-tx", "intent.json");
     let mut intent: Value = serde_json::from_slice(&h.files[&path]).unwrap();
     edit(&mut intent);
     h.files.insert(path, intent.to_string().into_bytes());
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm")
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG)
 }
 #[test]
 fn a_claim_compares_each_field_of_the_transaction() {
@@ -2700,7 +2719,7 @@ fn a_resumed_claim_finds_its_own_entry_under_a_reused_id() {
         ..Fake::default()
     };
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
-    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).is_err());
     h.fail_entry(ARB, "1-tx", "pending");
     h.files.insert(
         outbox_path(ARB, "pending", "1-tx", "intent.json"),
@@ -2708,7 +2727,7 @@ fn a_resumed_claim_finds_its_own_entry_under_a_reused_id() {
             .to_string()
             .into_bytes(),
     );
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
     assert_eq!(
         (d.state.as_str(), d.steps[0].state.as_str()),
@@ -2723,8 +2742,8 @@ fn an_unreadable_challenge_offers_no_discard() {
         ..Fake::default()
     };
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     h.unreadable = Some(outbox_path(
         ARB,
         "pending",
@@ -2732,7 +2751,8 @@ fn an_unreadable_challenge_offers_no_discard() {
         "approval_challenge.json",
     ));
     h.allowance = U256::ZERO;
-    let refusal = workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err();
+    let refusal =
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err();
     assert!(
         refusal.ends_with("create a new reviewed intent"),
         "{refusal}"
@@ -2769,7 +2789,7 @@ fn a_fee_bump_shows_by_its_marker_and_under_a_reused_id() {
     );
 }
 #[test]
-fn a_shared_entry_bloom_cannot_settle_says_to_check_the_chain() {
+fn a_shared_entry_whose_resend_failed_says_to_confirm_its_holder() {
     let mut h = Fake {
         dedupe: true,
         ..Fake::default()
@@ -2777,13 +2797,35 @@ fn a_shared_entry_bloom_cannot_settle_says_to_check_the_chain() {
     for id in ["one", "two"] {
         workflow::create(&mut h, ARB, &account(), BUY, id, &body()).unwrap();
     }
-    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
+    let ambiguous = outbox_path(ARB, "pending", "1-tx", "reconcile_ambiguous.json");
     h.files.insert(
-        outbox_path(ARB, "pending", "1-tx", "reconcile_ambiguous.json"),
-        b"{}".to_vec(),
+        ambiguous.clone(),
+        json!({"reason": "public resubmit failed: connection refused"})
+            .to_string()
+            .into_bytes(),
     );
-    let refusal = workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm").unwrap_err();
-    assert!(refusal.contains("check its hashes on chain"), "{refusal}");
+    let refusal =
+        workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm", PKG).unwrap_err();
+    assert!(
+        refusal.contains("so write `confirm` to /petals/pendle/arbitrum/buy-pt/alice/0/one/confirm.json to let Bloom settle it"),
+        "{refusal}"
+    );
+    // For any other reason Bloom will not resend it: confirming loops.
+    h.files.insert(
+        ambiguous,
+        json!({"reason": "account nonce advanced to 7, but tx 0xone was not found"})
+            .to_string()
+            .into_bytes(),
+    );
+    let refusal =
+        workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm", PKG).unwrap_err();
+    assert!(
+        refusal.contains(
+            "it may have been sent and Bloom no longer settles it: check its hashes on chain"
+        ),
+        "{refusal}"
+    );
 }
 #[test]
 fn another_entrys_failed_record_is_not_this_steps() {
@@ -2877,12 +2919,12 @@ fn shared_entry_advice_follows_the_holders_approval() {
         for id in ["one", "two"] {
             workflow::create(&mut h, ARB, &account(), BUY, id, &body()).unwrap();
         }
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
         h.files.insert(
             outbox_path(ARB, "pending", "1-tx", "approval_challenge.json"),
             json!({"state": state}).to_string().into_bytes(),
         );
-        workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm").unwrap_err()
+        workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm", PKG).unwrap_err()
     };
     let holder = "Bloom returned pending outbox entry 1-tx of operation buy-pt/one/0; ";
     assert_eq!(
@@ -2950,11 +2992,16 @@ fn a_refused_confirm_says_what_bloom_did() {
         let mut h = Fake::default();
         staged_with_approval(&mut h);
         h.confirm_failure = Some(failure);
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err()
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err()
     };
     let refused = "Bloom has not confirmed the transaction";
     // Bloom's own reason stands, such as a nonce gap with its holders.
-    assert_eq!(refusal("reason"), format!("{refused}: {NONCE_GAP}"));
+    assert_eq!(
+        refusal("reason"),
+        format!(
+            "{refused}: confirm EVM outbox: nonce gap: tx for 0x7e5f uses nonce 1 but the account's next on-chain nonce is 0 — the node would queue it behind the missing nonce(s) and it could never mine. Nonce 0 is held by staged transaction 9-tx. Finish the operation that staged it first; if it is discarded instead, this entry can never be sent and needs a new intent."
+        )
+    );
     // A bare status: the step's own entry says what happened.
     let discarded = "Bloom discarded the entry unsent, as it does after a policy refusal, a refused approval or a ceremony limit; status shows the operation failed";
     assert_eq!(refusal("discard"), format!("{refused}: {discarded}"));
@@ -2964,7 +3011,7 @@ fn a_refused_confirm_says_what_bloom_did() {
     );
     assert_eq!(
         refusal("denied"),
-        "Bloom denied the transaction: Bloom kept the entry: an owner approval it cannot use, an entry staged by another build, or a pending wallet-policy approval; inspect the outbox entry and the wallet's policy updates"
+        "Bloom denied the transaction: Bloom kept the entry. It denies without discarding when this route may not use it (an entry staged by another build or another account, a missing write permit, an unavailable outbox, or a Broker eligibility failure), when a wallet-policy approval is pending, or when an owner approval cannot be used; inspect the outbox entry and the wallet's policy updates"
     );
     assert_eq!(
         refusal("plain"),
@@ -2977,7 +3024,7 @@ fn a_refused_confirm_says_what_bloom_did() {
     let mut h = Fake::default();
     staged_with_approval(&mut h);
     h.confirm_failure = Some("discard");
-    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").is_err());
+    assert!(workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).is_err());
     assert_eq!(
         workflow::reconcile(&mut h, ARB, &account(), BUY, "one")
             .unwrap()
@@ -2998,7 +3045,7 @@ fn a_refusal_after_a_lost_reply_never_reads_as_unsent() {
         );
         h.confirm_failure = Some(failure);
         let refusal =
-            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err();
+            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err();
         assert!(
             refusal.ends_with("Bloom may already have sent it, so read status and check its hash on chain before creating a new intent"),
             "{failure}: {refusal}"
@@ -3012,7 +3059,8 @@ fn a_send_that_may_have_gone_out_is_never_called_unsent() {
     let mut h = Fake::default();
     staged_with_approval(&mut h);
     h.confirm_failure = Some("lost-send");
-    let refusal = workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err();
+    let refusal =
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err();
     assert!(refusal.ends_with(maybe), "{refusal}");
     // Later Bloom reports a lost reply's hash with no marker for the Petal.
     let mut h = Fake::default();
@@ -3020,7 +3068,8 @@ fn a_send_that_may_have_gone_out_is_never_called_unsent() {
     h.outbox
         .insert("1-tx".into(), ("pending".into(), Some("0xreported".into())));
     h.confirm_failure = Some("plain");
-    let refusal = workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err();
+    let refusal =
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err();
     assert!(refusal.ends_with(maybe), "{refusal}");
 }
 #[test]
@@ -3035,7 +3084,7 @@ fn an_older_failed_entry_under_the_id_is_not_this_ones_discard() {
     );
     h.confirm_failure = Some("plain");
     assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap_err(),
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
         "Bloom has not confirmed the transaction: Bloom gave no reason the Petal can show; inspect the outbox entry"
     );
 }
@@ -3049,7 +3098,7 @@ fn a_shared_entry_whose_challenge_cannot_be_read_offers_no_discard() {
         for id in ["one", "two"] {
             workflow::create(&mut h, ARB, &account(), BUY, id, &body()).unwrap();
         }
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm").unwrap();
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
         let challenge = outbox_path(ARB, "pending", "1-tx", "approval_challenge.json");
         if garbled {
             h.files.insert(challenge, b"{not json".to_vec());
@@ -3058,7 +3107,7 @@ fn a_shared_entry_whose_challenge_cannot_be_read_offers_no_discard() {
             h.unreadable = Some(challenge);
         }
         let refusal =
-            workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm").unwrap_err();
+            workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm", PKG).unwrap_err();
         assert!(!refusal.contains("`cancel`"), "{garbled}: {refusal}");
         assert!(
             refusal.contains("may have been sent or signed"),
@@ -3129,4 +3178,383 @@ fn a_zero_ceiling_refuses_even_a_redemption() {
             "{bps} bps"
         );
     }
+}
+#[test]
+fn bloom_reasons_are_shown_without_urls_control_text_or_advice_the_petal_cannot_follow() {
+    use pendle_route::host::{bloom_reason, confirm_refusal};
+    // Bloom 0.4.1's own texts, as the SDK passes them.
+    let revert = "backend: confirm EVM outbox: pre-broadcast simulation reverted: 0xe450d38c — write 'override' to broadcast anyway";
+    assert_eq!(
+        bloom_reason(revert),
+        "confirm EVM outbox: pre-broadcast simulation reverted: 0xe450d38c"
+    );
+    assert_eq!(
+        bloom_reason(NONCE_GAP),
+        "confirm EVM outbox: nonce gap: tx for 0x7e5f uses nonce 1 but the account's next on-chain nonce is 0 — the node would queue it behind the missing nonce(s) and it could never mine. Nonce 0 is held by staged transaction 9-tx. Finish the operation that staged it first; if it is discarded instead, this entry can never be sent and needs a new intent."
+    );
+    let signing = "backend: confirm EVM outbox: approval state error: durable Broker signing projection conflicts with exact transaction bytes; a signature may already exist — reconcile the recorded signing operation or discard the entry";
+    assert_eq!(
+        bloom_reason(signing),
+        "confirm EVM outbox: approval state error: durable Broker signing projection conflicts with exact transaction bytes; a signature may already exist: do not discard it. Confirming again repeats this refusal, so inspect the outbox entry with the wallet's owner or operator."
+    );
+    // A provider key in an RPC URL never reaches the user.
+    let transport = "backend: confirm EVM outbox: chain: transport: error sending request for url (https://eth-mainnet.g.alchemy.com/v2/SECRETKEY), then wss://node.example/ws?key=abc";
+    let shown = bloom_reason(transport);
+    assert!(
+        !shown.contains("SECRETKEY") && !shown.contains("key=abc"),
+        "{shown}"
+    );
+    assert_eq!(
+        shown,
+        "confirm EVM outbox: chain: transport: error sending request for url (<rpc url>), then <rpc url>"
+    );
+    // A revert string's control characters become spaces; length is capped.
+    assert_eq!(
+        bloom_reason("execution reverted: bad\ninput\x1b[31m"),
+        "execution reverted: bad input [31m"
+    );
+    assert_eq!(bloom_reason(&"é".repeat(700)).chars().count(), 600);
+    // Statuses the SDK reduced carry no reason.
+    assert_eq!(
+        confirm_refusal(&petal::SdkError::Host(petal::HostStatus::Denied)),
+        "Bloom denied the transaction"
+    );
+    assert_eq!(
+        confirm_refusal(&petal::SdkError::Host(petal::HostStatus::NotFound)),
+        "Bloom has not confirmed the transaction"
+    );
+    assert_eq!(
+        confirm_refusal(&petal::SdkError::Message(revert.into())),
+        "Bloom has not confirmed the transaction: confirm EVM outbox: pre-broadcast simulation reverted: 0xe450d38c"
+    );
+}
+#[test]
+fn a_resend_bloom_could_not_settle_stays_confirmable() {
+    // The submit failed, and a retry made Bloom record the attempt as
+    // ambiguous. Bloom resends only the same signed bytes, so confirm lets
+    // it try again, quote or not.
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    for (file, value) in [
+        ("broadcast_attempted.json", json!({"tx_hash": "0xswap"})),
+        (
+            "reconcile_ambiguous.json",
+            json!({"reason": "public resubmit failed: connection refused"}),
+        ),
+    ] {
+        h.files.insert(
+            outbox_path(ARB, "pending", "1-tx", file),
+            value.to_string().into_bytes(),
+        );
+    }
+    h.now += 300_001;
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(
+        (d.state.as_str(), d.steps[0].tx_hash.as_deref()),
+        ("staged", Some("0xswap"))
+    );
+    h.approved = true;
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
+    assert_eq!(h.mined, BTreeSet::from(["1-tx".into()]));
+}
+#[test]
+fn a_wallet_policy_approval_names_the_package_even_when_the_policy_allows_it() {
+    // Bloom hands back any pending wallet-policy update. A Petal cannot read
+    // the wallet policy to tell whether it already allows the package, so
+    // the approval is recorded and the owner checks it on the ceremony page.
+    let mut h = Fake {
+        approval_action: "policy-update".into(),
+        ..Fake::default()
+    };
+    h.files.insert(
+        "wallets/alice/policy.json".into(),
+        json!({"allowed_petal_packages": [PKG]})
+            .to_string()
+            .into_bytes(),
+    );
+    staged_with_approval(&mut h);
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    let approval = d.steps[0].approval.clone().unwrap();
+    assert_eq!(
+        (
+            approval.action_id.as_str(),
+            approval.kind.as_str(),
+            approval.package.as_deref()
+        ),
+        ("policy-update", "wallet_policy", Some(PKG))
+    );
+    assert_eq!(d.state, "approval_required");
+}
+#[test]
+fn a_policy_discard_says_which_check_refused_it() {
+    let refused = json!([
+        {"rule": "allowlists.recipients", "outcome": "pass", "class": "informational", "message": "router is on allowlist"},
+        {"rule": "balance.native_funds", "outcome": "deny", "class": "hard", "message": "account 0x7e5f has 0 ETH; Fund the account and restage"}
+    ]);
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.confirm_failure = Some("denied-discard");
+    // Bloom's policy checks move with the discarded entry.
+    h.files.insert(
+        outbox_path(ARB, "failed", "1-tx", "policy_check.json"),
+        refused.to_string().into_bytes(),
+    );
+    assert_eq!(
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
+        "Bloom denied the transaction: Bloom's policy refused it and discarded the entry unsent: balance.native_funds: account 0x7e5f has 0 ETH; Fund the account and restage; status shows the operation failed"
+    );
+    assert_eq!(
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
+        format!(
+            "{NEVER_SENT}. Bloom's policy refused it: balance.native_funds: account 0x7e5f has 0 ETH; Fund the account and restage"
+        )
+    );
+}
+#[test]
+fn a_refusal_after_bloom_sent_the_step_warns_it_may_have_gone_out() {
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.confirm_failure = Some("sent-then-error");
+    let refusal =
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err();
+    assert!(
+        refusal.ends_with("Bloom may already have sent it, so read status and check its hash on chain before creating a new intent"),
+        "{refusal}"
+    );
+}
+#[test]
+fn a_shared_entry_with_only_a_replacement_or_cancel_is_never_offered_for_discard() {
+    for file in ["replacement_tx_hash", "cancel_tx_hash"] {
+        let mut h = Fake {
+            dedupe: true,
+            ..Fake::default()
+        };
+        for id in ["one", "two"] {
+            workflow::create(&mut h, ARB, &account(), BUY, id, &body()).unwrap();
+        }
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
+        h.files.insert(
+            outbox_path(ARB, "pending", "1-tx", file),
+            b"0xother".to_vec(),
+        );
+        let refusal =
+            workflow::confirm(&mut h, ARB, &account(), BUY, "two", b"confirm", PKG).unwrap_err();
+        assert!(!refusal.contains("`cancel`"), "{file}: {refusal}");
+        assert!(
+            refusal.contains("check its hashes on chain"),
+            "{file}: {refusal}"
+        );
+    }
+}
+#[test]
+fn a_nonce_gap_nothing_fills_offers_this_entrys_discard() {
+    use pendle_route::host::{bloom_reason, unheld_nonce};
+    // Bloom names no holder: the entry that held nonce 0 is gone.
+    assert_eq!(
+        bloom_reason(UNHELD_GAP),
+        "confirm EVM outbox: nonce gap: tx for 0x7e5f uses nonce 1 but the account's next on-chain nonce is 0 — the node would queue it behind the missing nonce(s) and it could never mine. No pending entry holds nonce 0, so this entry can never be sent; create a new reviewed intent"
+    );
+    // Holders that start above the next nonce leave the gap open too.
+    let partial = NONCE_GAP
+        .replace("nonce 1 but", "nonce 2 but")
+        .replace("Nonce 0 is held", "Nonce 1 is held");
+    assert_eq!(unheld_nonce(&partial), Some(0));
+    assert_eq!(unheld_nonce(&bloom_reason(&partial)), Some(0));
+    let many = NONCE_GAP.replace(
+        "Nonce 0 is held by staged transaction 9-tx.",
+        "Nonces 0, 1 are held by staged transactions 9-tx, 10-tx.",
+    );
+    assert_eq!(unheld_nonce(&many), None);
+    assert_eq!(unheld_nonce(NONCE_GAP), None);
+    assert_eq!(unheld_nonce("pre-broadcast simulation reverted: 0x"), None);
+    // Bloom checks the gap while building the transaction, before it asks
+    // for an approval. The step's unsent entry holds nonce 1 for every later
+    // transaction.
+    let mut h = Fake::default();
+    workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
+    h.confirm_failure = Some("unheld-gap");
+    let refusal =
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err();
+    assert!(
+        refusal.ends_with("so this entry can never be sent; create a new reviewed intent; first discard its unsent outbox entry by writing `cancel` to /wallets/alice/0/chains/arbitrum/outbox/pending/1-tx/confirm"),
+        "{refusal}"
+    );
+    // Once the owner approved it, Bloom may be signing it: no discard.
+    h.files.insert(
+        outbox_path(ARB, "pending", "1-tx", "approval_challenge.json"),
+        json!({"state": "active"}).to_string().into_bytes(),
+    );
+    h.confirm_failure = Some("unheld-gap");
+    let refusal =
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err();
+    assert!(
+        refusal.ends_with("so this entry can never be sent; create a new reviewed intent"),
+        "{refusal}"
+    );
+    // While an entry holds the next nonce, finishing it fills the gap.
+    h.confirm_failure = Some("reason");
+    let refusal =
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err();
+    assert!(
+        refusal.ends_with("Finish the operation that staged it first; if it is discarded instead, this entry can never be sent and needs a new intent."),
+        "{refusal}"
+    );
+}
+#[test]
+fn a_lost_reply_bloom_will_not_resend_is_broadcast_unknown() {
+    // Bloom resends only after a failed public resubmit. Any other reason
+    // repeats on every confirm until the hash shows on chain.
+    for reason in [
+        "account nonce advanced to 7, but tx 0xswap was not found",
+        "other same-nonce attempts exist: 1",
+        "private relay attempt absent from public RPC; refusing to leak to public mempool",
+        "current policy requests private routing; refusing to replay old public attempt automatically",
+        r#"{"nonce":0,"pending":"0xother"}"#,
+    ] {
+        let mut h = Fake::default();
+        staged_with_approval(&mut h);
+        for (file, value) in [
+            ("broadcast_attempted.json", json!({"tx_hash": "0xswap"})),
+            ("reconcile_ambiguous.json", json!({"reason": reason})),
+        ] {
+            h.files.insert(
+                outbox_path(ARB, "pending", "1-tx", file),
+                value.to_string().into_bytes(),
+            );
+        }
+        let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+        assert_eq!(
+            (
+                d.state.as_str(),
+                d.steps[0].state.as_str(),
+                d.steps[0].tx_hash.as_deref()
+            ),
+            ("broadcast_unknown", "broadcast_unknown", Some("0xswap")),
+            "{reason}"
+        );
+        assert_eq!(
+            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
+            "Bloom no longer sends an outbox step but may have broadcast it; check its hash on chain before creating a new intent"
+        );
+    }
+    // An unreadable reason is not taken as a resend Bloom will make.
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    for (file, value) in [
+        (
+            "broadcast_attempted.json",
+            json!({"tx_hash": "0xswap"}).to_string(),
+        ),
+        ("reconcile_ambiguous.json", "{".into()),
+    ] {
+        h.files.insert(
+            outbox_path(ARB, "pending", "1-tx", file),
+            value.into_bytes(),
+        );
+    }
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(d.state, "broadcast_unknown");
+}
+#[test]
+fn a_wallet_policy_update_never_replaces_a_requested_transaction_approval() {
+    // Bloom asked for the step's transaction approval; then the owner starts
+    // an unrelated policy edit, which Bloom hands back before the entry.
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.approval_action = "owner-edit".into();
+    assert_eq!(
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
+        "Bloom asks for wallet-policy update owner-edit, under /wallets/alice/policy-updates/pending/, before it uses this step's transaction approval; approve or cancel that update on its page, wait a few seconds after a cancel, then confirm again"
+    );
+    // The quote lapses meanwhile; the requested approval still lets the step
+    // continue, and the approved entry is sent.
+    h.now += 300_001;
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    let approval = d.steps[0].approval.clone().unwrap();
+    assert_eq!(
+        (
+            d.state.as_str(),
+            approval.kind.as_str(),
+            approval.action_id.as_str()
+        ),
+        ("approval_required", "transaction", "pending-action")
+    );
+    h.approval_action = "pending-action".into();
+    h.approved = true;
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
+    assert_eq!(h.mined, BTreeSet::from(["1-tx".into()]));
+}
+#[test]
+fn reasons_hide_every_url_and_invisible_character() {
+    use pendle_route::host::bloom_reason;
+    for raw in [
+        "backend: confirm EVM outbox: chain: transport: error sending request for url (https://rpc.example/v2/KEY;session=SECRET)",
+        "backend: confirm EVM outbox: chain: transport: error sending request for url (https://a.example/K1),(https://b.example/SECRET)",
+        "backend: confirm EVM outbox: chain: transport: error sending request for url (HTTPS://rpc.example/v2/SECRET)",
+        "backend: confirm EVM outbox: chain: transport: error sending request for url (https://rpc.example/?a=1,key=SECRET)",
+        r#"backend: confirm EVM outbox: chain: transport: HTTP error 403 with body: {"error":"denied for https:\/\/rpc.example\/v2\/SECRET"}"#,
+        r#"backend: {"a":"https://a.example/K1","b":"wss://b.example/SECRET"}"#,
+        "backend: ipc://var/run/SECRET and Wss://node/SECRET",
+    ] {
+        let shown = bloom_reason(raw);
+        assert!(
+            !shown.contains("SECRET") && !shown.contains("K1") && shown.contains("<rpc url>"),
+            "{shown}"
+        );
+    }
+    assert_eq!(
+        bloom_reason(
+            "backend: error for url (https://a.example/K1),(https://b.example/K2); retrying"
+        ),
+        "error for url (<rpc url>),(<rpc url>); retrying"
+    );
+    // A bare "://" with no scheme is not a URL, and text after it stays.
+    assert_eq!(bloom_reason("odd :// text"), "odd :// text");
+    // A revert string cannot hide, reorder or break text.
+    let shown = bloom_reason(
+        "backend: confirm EVM outbox: pre-broadcast simulation reverted: bad\u{2028}Bloom discarded the entry unsent\u{2029}\u{202E}gnirts\u{200B}\u{2066}x\u{FEFF}\u{AD}\u{E0041} — write 'override' to broadcast anyway",
+    );
+    assert_eq!(
+        shown,
+        "confirm EVM outbox: pre-broadcast simulation reverted: bad Bloom discarded the entry unsent  gnirts  x   "
+    );
+}
+#[test]
+fn the_fake_reads_only_the_selected_account_as_bloom_does() {
+    // Bloom lets a Petal read wallets/<wallet>/<number>/ only for the
+    // account its route selected, with the number as Bloom prints it.
+    let mut h = Fake::default();
+    let own = "wallets/alice/0/chains/arbitrum/outbox/pending/1-tx/intent.json";
+    for path in [
+        own,
+        "wallets/bob/0/chains/arbitrum/outbox/pending/1-tx/intent.json",
+        "wallets/alice/1/chains/arbitrum/outbox/pending/1-tx/intent.json",
+        "wallets/alice/00/chains/arbitrum/outbox/pending/1-tx/intent.json",
+        "wallets/alice/+0/chains/arbitrum/outbox/pending/1-tx/intent.json",
+        "wallets/alice/policy.json",
+        "petals/pendle/status.json",
+    ] {
+        h.files.insert(path.into(), b"{}".to_vec());
+        assert_eq!(h.vfs_file(path, 1024).is_ok(), path == own, "{path}");
+    }
+}
+#[test]
+fn another_entry_in_sent_under_the_id_is_not_this_steps_send() {
+    // Ids repeat after Bloom restarts: an older entry under the same id was
+    // sent, and this step's own entry is still pending and unsent.
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    let created = h.created(ARB, "1-tx");
+    h.files.insert(
+        outbox_path(ARB, "sent", "1-tx", "intent.json"),
+        json!({"status": "sent", "tx_hash": "0xold", "created_ms": created - 1})
+            .to_string()
+            .into_bytes(),
+    );
+    h.confirm_failure = Some("bare");
+    assert_eq!(
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
+        "Bloom has not confirmed the transaction: Bloom gave no reason the Petal can show; inspect the outbox entry"
+    );
 }

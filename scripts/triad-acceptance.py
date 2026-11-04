@@ -125,6 +125,7 @@ def main():
         nonlocal count
         assert url.startswith(env["BLOOM_TRIAD_DEV_CEREMONY_ORIGIN"] + "/ceremony/")
         count += 1
+        print(f"ceremony {count}: {url}", flush=True)
         command([str(args.driver), "complete", url, auth_seed, "--sign-count", str(count)])
 
     def launch_field(text, name):

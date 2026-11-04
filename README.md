@@ -59,9 +59,9 @@ Draft body (all amounts are decimal strings in base units):
 SY is supported directly. Other ERC-20s must be native inputs/outputs of that
 market's SY wrapper. Slippage is 1–100 bps; price impact ceiling is 0–300 bps.
 The ceiling bounds the size of the impact Pendle reports, which is negative
-for an adverse move. Pendle reports a few bps even for small trades, and a
-few millionths for a matured redemption, so a ceiling under about 5 bps
-refuses most trades and 0 refuses every trade.
+for an adverse move. Pendle reports a few bps even for small trades, and
+about a ten-millionth for a matured redemption, so a ceiling under about 5
+bps refuses most trades, and 0 refuses any trade with a reported impact.
 PT maturity/redemption is expressed in the accounting asset, which can differ
 from the underlying asset. API APYs and expected amounts remain estimates.
 
@@ -109,12 +109,21 @@ insufficient. A nonzero insufficient allowance is reset first. Each write to
 approval shown by Bloom, then retry the same path. Status exposes the outbox
 IDs so the owner can inspect pending approvals in the selected account.
 When Bloom refuses a confirm, the error carries Bloom's own reason, such as
-a nonce gap naming the entries that hold it, or a simulation revert. The
+a nonce gap naming the entry that holds it, or a simulation revert. URLs,
+which may carry a provider key, and control and invisible formatting
+characters are removed, and advice the Petal cannot follow (writing
+`override`, restaging with an explicit nonce, discarding an entry that may
+be signed) is replaced. When no pending entry holds the account's next
+nonce, nothing can fill the gap: the error says the entry can never be
+sent, and names the file that discards it while Bloom cannot be signing it.
+The
 Petal SDK reduces a reply that says "denied", "not found", "invalid" or
 "permission" to a bare status, as it does for a policy refusal or a refused
-approval; then the error says what the step's own outbox entry shows: Bloom
-discarded it unsent, or kept it. A refusal for a step Bloom may already have
-sent says so: check its hash on chain before creating a new intent.
+approval. Then the error says what the step's own outbox entry shows: Bloom
+discarded it unsent, with the policy checks that refused it, kept it after
+a denial, or gave no reason the Petal can show. A refusal for a step Bloom
+may already have sent says so: check its hash on chain before creating a
+new intent.
 `status.json` is not cached: every read reconciles with the outbox and
 derives the operation's `state` from its steps. It is `prepared` or `staged`
 when the next `confirm` stages or sends a step, `approval_required` while an
@@ -133,7 +142,7 @@ operation, or discard the entry if Bloom cannot have sent or signed it;
 finish that operation if the owner already approved it; wait for Bloom to
 expire the entry if its approval has ended; confirm that operation's route
 if it may have been sent; or check its hashes on chain if Bloom sent a
-replacement or cancel for it, or could not settle a lost reply.
+replacement or cancel for it, or will not resend a lost reply.
 
 Discarding means writing `cancel` to the entry's `confirm` file in Bloom's
 outbox. Bloom 0.4.1 discards whatever is written there, and keeps its
@@ -149,18 +158,33 @@ cover, which would revert. It does not count a transaction still in flight,
 so a swap confirmed while another on the same token waits to mine can
 revert. After a refusal, discard the staged swap if the refusal says so,
 then create a new intent: an entry left pending holds its nonce, and Bloom
-stages later transactions behind it.
+stages later transactions behind it. The Broker also allows one live
+ceremony per wallet, and at most 12 new ones in five minutes, whatever the
+token: a transaction ceremony it refuses to open ends the step unsent, while
+a refused wallet-policy ceremony leaves the entry pending.
 
 When Bloom asks for an approval, the step's `approval` gives its action id,
 expiry and `kind`. A `transaction` approval is in the step's outbox entry. It
 is `unknown` when the Petal cannot read the entry's intent. A
-`wallet_policy` approval adds this package to the wallet policy, which must
-list the package hash in `allowed_petal_packages`. After an install that
-changes the hash, the first `confirm` of a step staged after it asks for
-it, under `/wallets/<wallet>/policy-updates/pending/<action_id>/`. Staging
-does not. Bloom lets only the build that staged an entry inspect or confirm
-it, so finish operations before installing another build, or reinstall the
-build that staged them.
+`wallet_policy` approval is the wallet's pending policy update, which must
+list this package's hash in `allowed_petal_packages`. Bloom hands back any
+pending update, even one the package does not need, such as the owner's own
+edit, and a Petal can read neither the update nor the wallet policy. The
+approval shows the package hash as `package`: check on the ceremony page
+that the update adds it and nothing you did not intend. To drop an update
+instead, cancel it and wait a few seconds before confirming: the Broker
+refuses a new ceremony for a short cooldown after a cancel, and Bloom then
+discards the entry. A cancel made on the ceremony page can instead leave
+the entry pending, with the next confirm denied while Bloom catches up;
+confirm again. Once Bloom has asked for a step's transaction approval, a
+wallet-policy update it hands back does not replace it: `confirm` names the
+update and records nothing, so the transaction approval still lets the step
+continue after the quote expires. After an install that changes the hash,
+the first `confirm` of a step staged after it asks for the update, under
+`/wallets/<wallet>/policy-updates/pending/<action_id>/`. Staging does not.
+Bloom lets only the build that staged an entry inspect or confirm it, so
+finish operations before installing another build, or reinstall the build
+that staged them.
 
 Bloom 0.4.1 moves an entry it expires or refuses under policy, and a send it
 cancels, to `outbox/failed/` and keeps reporting the status it had, so the
@@ -195,15 +219,19 @@ A lost submit reply can also leave the broadcast marker in a pending entry.
 The step stays `staged`, showing the marker's hash, asks for no ceremony and
 never expires: the next `confirm` lets Bloom settle that attempt, without
 rechecking the market. Only a transaction approval is cleared: a
-wallet-policy approval Bloom asks for to settle it stays shown. A marker
-with no readable hash, a same-nonce replacement or cancel recorded in the
-pending entry (`replacement_tx_hash`, `replacement_broadcast_attempted.json`,
-`cancel_tx_hash`, `cancel_broadcast_attempted.json`), and Bloom's
-`reconcile_ambiguous.json`, written when it cannot settle the attempt, make
-the step `broadcast_unknown` instead: check the hashes on chain. Bloom also
-writes `reconcile_ambiguous.json` for failures that pass, such as a slow
-RPC; once the chain shows the transaction, writing `confirm` to the entry's
-`confirm` file in Bloom's outbox lets Bloom settle it.
+wallet-policy approval Bloom asks for to settle it stays shown. When Bloom
+could not settle the attempt, it writes why in `reconcile_ambiguous.json`.
+It resends the same signed transaction only after a failed public resubmit,
+so then the step also stays `staged` and the next `confirm` lets it try
+again. For any other reason (the account's nonce moved past it, another
+transaction holds the nonce, a private relay, or a policy now asking for
+private routing) Bloom refuses every confirm until the hash shows on chain,
+so the step is `broadcast_unknown`. So is one whose reason cannot be read. A
+marker with no readable hash, or a same-nonce replacement or cancel recorded
+in the pending entry (`replacement_tx_hash`,
+`replacement_broadcast_attempted.json`, `cancel_tx_hash`,
+`cancel_broadcast_attempted.json`), makes the step `broadcast_unknown`
+instead: check the hashes on chain.
 
 Bloom reports the first entry it finds under an id, in `pending/`, then
 `sent/`, then `failed/`. When that entry's creation time is not the step's,
