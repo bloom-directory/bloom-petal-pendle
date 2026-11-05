@@ -85,6 +85,16 @@ pub fn lock_key(chain: Chain, op: Operation, id: &str) -> Result<String> {
         operation_id(id)?
     ))
 }
+/// Builds before Ethereum support stored Arbitrum operations without a chain
+/// segment. Such an operation may already have a Bloom outbox entry this build
+/// cannot see, so a second draft under the same id could trade twice.
+fn refuse_legacy<H: Host>(host: &mut H, chain: Chain, op: Operation, id: &str) -> Result<()> {
+    let legacy = format!("operations/{}/{}.json", op.name(), operation_id(id)?);
+    if chain == Chain::Arbitrum && host.get(&legacy)?.is_some() {
+        return Err("an older Pendle build staged this id; finish it with that build".into());
+    }
+    Ok(())
+}
 fn save<H: Host>(host: &mut H, draft: &Draft) -> Result<()> {
     host.put(
         &key(draft.chain, draft.operation, &draft.id)?,
@@ -98,9 +108,10 @@ pub fn load<H: Host>(
     op: Operation,
     id: &str,
 ) -> Result<Draft> {
-    let data = host
-        .get(&key(chain, op, id)?)?
-        .ok_or("operation not found")?;
+    let Some(data) = host.get(&key(chain, op, id)?)? else {
+        refuse_legacy(host, chain, op, id)?;
+        return Err("operation not found".into());
+    };
     let draft: Draft = serde_json::from_slice(&data).map_err(|_| "invalid persisted operation")?;
     if draft.schema != SCHEMA || draft.chain != chain || draft.market.chain_id != chain.id() {
         return Err("persisted operation does not belong to the selected chain".into());
@@ -134,6 +145,7 @@ pub fn create<H: Host>(
             Err("id already binds a different intent; choose a new id".into())
         };
     }
+    refuse_legacy(host, chain, op, id)?;
     let owner = account_address(host, account)?;
     let market = api::market(host, chain, &request.market)?;
     evm::verify_market(host, chain, &market, op, address(&request.token)?)?;

@@ -602,6 +602,17 @@ fn reject_embedded_limit_order_and_wrong_operation() {
     assert!(validate_transaction(&tx(), OWNER, Operation::SellPt, &request(), &market()).is_err());
 }
 #[test]
+fn legacy_arbitrum_operation_is_refused_not_redrafted() {
+    let mut h = Fake::default();
+    h.store
+        .insert("operations/buy-pt/one.json".into(), b"{}".to_vec());
+    let err = workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap_err();
+    assert!(err.to_string().contains("older Pendle build"), "{err}");
+    let err = workflow::load(&mut h, ARB, &account(), BUY, "one").unwrap_err();
+    assert!(err.to_string().contains("older Pendle build"), "{err}");
+    assert_eq!(h.http_calls, 0);
+}
+#[test]
 fn draft_is_idempotent_and_never_stages() {
     let mut h = Fake::default();
     workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
