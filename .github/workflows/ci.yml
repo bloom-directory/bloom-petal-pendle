@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: route
+      # Keep these pins equal to petal-build.toml, route/Cargo.toml and
+      # PETAL_REV in scripts/build.sh; wasm-tools matches that revision's pin.
+      - name: Install component tools
+        run: cargo install wasm-tools --version 1.249.0 --locked
+      - name: Install the pinned Petal CLI
+        run: cargo install --git https://github.com/bloom-directory/petal --rev 7dd2722db5de305dd63ca4ed03591f3ab82fa40b --locked bloom-petal-cli
+      - name: Check, test, build and inspect every route
+        env:
+          PETAL_BIN: petal
+        run: scripts/check.sh
+      - name: Count the route components and confirm none signs
+        run: |
+          test "$(find petal/pendle -name '*.wasm' | wc -l | tr -d ' ')" = 35
+          # Route paths hold brackets such as [chain], so read them whole.
+          find petal/pendle -name '*.wasm' -print0 | while IFS= read -r -d '' component; do
+            if wasm-tools component wit "$component" | grep -q 'bloom:sign/signing@'; then
+              echo "$component imports signing" >&2
+              exit 1
+            fi
+          done
