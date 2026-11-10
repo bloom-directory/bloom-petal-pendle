@@ -90,6 +90,7 @@ pub fn market<H: Host>(host: &mut H, chain: Chain, market: &str) -> Result<Marke
 
 #[derive(Deserialize)]
 struct CuratedPage {
+    total: usize,
     results: Vec<CuratedMarket>,
 }
 #[derive(Deserialize)]
@@ -117,7 +118,8 @@ pub fn uncurated<H: Host>(host: &mut H, chain: Chain, market: &str) -> Result<Op
     let page: CuratedPage = serde_json::from_slice(&fetch(host, "GET", url, None)?)
         .map_err(|_| "Pendle market list schema changed")?;
     match page.results.as_slice() {
-        [] => Ok(Some(format!(
+        // An empty page counts as Pendle's answer only when its total agrees.
+        [] if page.total == 0 => Ok(Some(format!(
             "market {expected:#x} is not on Pendle's curated list"
         ))),
         [listed]
@@ -126,7 +128,8 @@ pub fn uncurated<H: Host>(host: &mut H, chain: Chain, market: &str) -> Result<Op
         {
             Ok(None)
         }
-        _ => Err("Pendle's curated list answered for another market".into()),
+        [_] => Err("Pendle's curated list answered for another market".into()),
+        _ => Err("Pendle's curated list gave an inconsistent answer".into()),
     }
 }
 

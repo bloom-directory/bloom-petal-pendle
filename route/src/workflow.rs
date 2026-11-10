@@ -1002,7 +1002,9 @@ fn advance<H: Host>(
         // lookup is not Pendle's answer, so it gets no discard advice.
         if let Some(refusal) = api::uncurated(host, chain, &draft.request.market)? {
             let discard = discard_first(host, account, chain, draft.steps.get(index))?;
-            return Err(format!("{refusal}{discard}"));
+            return Err(format!(
+                "{refusal}; reconcile prior steps and create a new reviewed intent for a listed market{discard}"
+            ));
         }
         evm::verify_market(
             host,

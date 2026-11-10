@@ -1209,6 +1209,14 @@ fn recorded(body: &[u8]) -> Option<HttpResponse> {
 fn not_curated(market: &str) -> String {
     format!("market {market} is not on Pendle's curated list")
 }
+/// What `confirm` says when Pendle has dropped the market since the draft.
+fn dropped(market: &str) -> String {
+    format!(
+        "{}; reconcile prior steps and create a new reviewed intent for a listed market",
+        not_curated(market)
+    )
+}
+const INCONSISTENT: &str = "Pendle's curated list gave an inconsistent answer";
 #[test]
 fn an_uncurated_market_is_refused_before_anything_else_is_read() {
     let mut h = Fake {
@@ -1252,19 +1260,31 @@ fn pendles_answer_vouches_only_for_the_market_asked_for() {
         assert_eq!(api::curated(&mut h, chain, &asked).unwrap_err(), another);
     }
     let entry = |chain_id: u64, address: &str| json!({"chainId": chain_id, "address": address});
-    for (results, error) in [
+    for (total, results, error) in [
         (
+            2,
             json!([entry(42161, &market().address), entry(42161, LOOKALIKE)]),
-            another,
+            INCONSISTENT,
         ),
-        (json!([entry(42161, "0x1234")]), another),
         (
+            2,
+            json!([
+                entry(42161, &market().address),
+                entry(42161, &market().address)
+            ]),
+            INCONSISTENT,
+        ),
+        // An empty page is Pendle's refusal only when its total agrees.
+        (1, json!([]), INCONSISTENT),
+        (1, json!([entry(42161, "0x1234")]), another),
+        (
+            1,
             json!([{"address": market().address}]),
             "Pendle market list schema changed",
         ),
     ] {
         let mut h = Fake {
-            curated_answer: Some(json!({"total": 1, "results": results})),
+            curated_answer: Some(json!({"total": total, "results": results})),
             ..Fake::default()
         };
         assert_eq!(
@@ -1272,6 +1292,14 @@ fn pendles_answer_vouches_only_for_the_market_asked_for() {
             error
         );
     }
+    let mut h = Fake {
+        curated_answer: Some(json!({"results": []})),
+        ..Fake::default()
+    };
+    assert_eq!(
+        api::curated(&mut h, ARB, &market().address).unwrap_err(),
+        "Pendle market list schema changed"
+    );
     // Without an answer, nothing is drafted.
     let mut h = Fake {
         http_response: Some(HttpResponse {
@@ -1284,6 +1312,37 @@ fn pendles_answer_vouches_only_for_the_market_asked_for() {
     let error = workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap_err();
     assert!(error.starts_with("Pendle returned HTTP 503"), "{error}");
     assert!(h.store.is_empty());
+}
+#[test]
+fn checksummed_and_uppercase_markets_match_pendles_lowercase_answer() {
+    // Pendle lists addresses in lower case.
+    for asked in [
+        "0xF86119a39F8654F38acbbd5488Bd83f3F51983c8",
+        "0xF86119A39F8654F38ACBBD5488BD83F3F51983C8",
+    ] {
+        let mut h = Fake {
+            http_response: recorded(include_bytes!("fixtures/curated-arbitrum-susdai.json")),
+            ..Fake::default()
+        };
+        api::curated(&mut h, ARB, asked).unwrap();
+        assert_eq!(
+            h.requests[0].url,
+            format!(
+                "{API}/v2/markets/all?chainId=42161&ids=42161-0xf86119a39f8654f38acbbd5488bd83f3f51983c8"
+            )
+        );
+    }
+    // Nothing that is not an address reaches Pendle's query.
+    for bad in [
+        " 0xf86119a39f8654f38acbbd5488bd83f3f51983c8",
+        "f86119a39f8654f38acbbd5488bd83f3f51983c8",
+        "0Xf86119a39f8654f38acbbd5488bd83f3f51983c8",
+        "0xf86119a39f8654f38acbbd5488bd83f3f51983c8&ids=42161-0x3e510adb77ddb7a5c079c60e94711a20208bd588",
+    ] {
+        let mut h = Fake::default();
+        assert!(api::curated(&mut h, ARB, bad).is_err(), "{bad}");
+        assert_eq!(h.http_calls, 0, "{bad}");
+    }
 }
 #[test]
 fn a_matured_market_is_looked_up_without_the_active_filter() {
@@ -1326,7 +1385,7 @@ fn confirm_refuses_a_market_pendle_has_dropped_since_the_draft() {
     h.curated = false;
     let error =
         workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err();
-    assert_eq!(error, not_curated(&market().address));
+    assert_eq!(error, dropped(&market().address));
     assert!(h.staged.is_empty());
 
     // Once the owner may have approved a staged step: Bloom is not asked to
@@ -1339,7 +1398,7 @@ fn confirm_refuses_a_market_pendle_has_dropped_since_the_draft() {
     let confirms = h.confirms.len();
     let error =
         workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err();
-    assert_eq!(error, not_curated(&market().address));
+    assert_eq!(error, dropped(&market().address));
     assert_eq!(h.confirms.len(), confirms);
     h.curated = true;
     workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
@@ -1365,12 +1424,16 @@ fn confirm_refuses_a_market_pendle_has_dropped_since_the_draft() {
         assert_eq!(h.confirms.len(), confirms);
         error
     };
-    assert_eq!(
-        awaiting(&|h| h.curated = false),
+    let discard = |id: &str| {
         format!(
-            "{}; first discard its unsent outbox entry by writing `cancel` to /wallets/alice/0/chains/arbitrum/outbox/pending/1-tx/confirm",
-            not_curated(&market().address)
+            "{}; first discard its unsent outbox entry by writing `cancel` to /wallets/alice/0/chains/arbitrum/outbox/pending/{id}/confirm",
+            dropped(&market().address)
         )
+    };
+    assert_eq!(awaiting(&|h| h.curated = false), discard("1-tx"));
+    assert_eq!(
+        awaiting(&|h| h.curated_answer = Some(json!({"total": 1, "results": []}))),
+        INCONSISTENT
     );
     assert_eq!(
         awaiting(&|h| {
@@ -1389,6 +1452,30 @@ fn confirm_refuses_a_market_pendle_has_dropped_since_the_draft() {
             ]}))
         }),
         "Pendle's curated list answered for another market"
+    );
+
+    // The same holds for a later step: the swap staged once its approval
+    // mined.
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.approved = true;
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
+    h.approved = false;
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
+    let d = workflow::reconcile(&mut h, ARB, &account(), BUY, "one").unwrap();
+    assert_eq!(d.steps[0].state, "confirmed");
+    assert_eq!(d.steps[1].outbox_id.as_deref(), Some("2-tx"));
+    h.files.insert(
+        outbox_path(ARB, "pending", "2-tx", "approval_challenge.json"),
+        json!({"state": "awaiting_ceremony"})
+            .to_string()
+            .into_bytes(),
+    );
+    h.curated = false;
+    assert_eq!(
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
+        discard("2-tx")
     );
 
     // A step Bloom may already have sent is Bloom's to settle, listed or not.

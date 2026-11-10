@@ -54,12 +54,14 @@ a draft and every `confirm` look the market up in Pendle's curated list, and
 refuse one that is not on it: `market <address> is not on Pendle's curated
 list`. The lookup leaves out `isActive`, so a matured market can still be
 redeemed. A market Pendle drops after an incident is refused at the next
-`confirm`. If that step's staged entry is unsent and its owner approval
-still awaits its ceremony, the refusal also names the file that discards
-the entry, which holds its nonce until then (see below). A failed lookup
-is not Pendle's answer, so its error offers no discard. Reading
-`draft.json` gives the same guidance, with this chain's and account's
-paths.
+`confirm`, which says to create a new reviewed intent for a listed market.
+If that step's staged entry is unsent and its owner approval, if any, still
+awaits its ceremony, the refusal also names the file that discards the
+entry, which holds its nonce until then (see below). A failed or
+inconsistent lookup is not Pendle's answer, so its error offers no
+discard. There is no override: a position in a market Pendle drops cannot
+be sold or redeemed through the Petal. Reading `draft.json` gives the same
+guidance, with this chain's and account's paths.
 
 Draft body (all amounts are decimal strings in base units):
 
@@ -129,8 +131,11 @@ own entries.
 The plan contains exact-amount token approval steps only when allowance is
 insufficient. A nonzero insufficient allowance is reset first. Each write to
 `confirm.json` advances one step through Bloom's outbox. Complete the owner
-approval shown by Bloom, then retry the same path. Status exposes the outbox
-IDs so the owner can inspect pending approvals in the selected account.
+approval shown by Bloom, then retry the same path. Do not write to the
+`retry_path` that Bloom's `approval_challenge.json` names instead: it
+confirms the entry without the Petal's curated-list, factory, maturity and
+allowance rechecks. Status exposes the outbox IDs so the owner can inspect
+pending approvals in the selected account.
 When Bloom refuses a confirm, the error carries Bloom's own reason, such as
 a nonce gap naming the entry that holds it, or a simulation revert. URLs,
 which may carry a provider key, and control and invisible formatting

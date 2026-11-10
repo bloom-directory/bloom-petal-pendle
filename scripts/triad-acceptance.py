@@ -18,6 +18,9 @@ import urllib.request
 import urllib.error
 
 ROUTER = "0x888888888889758f76e7103c6cbf23abbf58f946"
+# An Arbitrum "USDai" market from Pendle's factory that Pendle has not curated.
+# It is not a market on Ethereum, so both chains' curated lists leave it out.
+UNCURATED = "0x3e510adb77ddb7a5c079c60e94711a20208bd588"
 ROOT = Path(__file__).resolve().parents[1]
 # One market per chain. `token` is what the test buys PT with and sells PT for;
 # `balance_slot` is that token's ERC-20 balance mapping slot, for `cast index`.
@@ -157,6 +160,9 @@ def main():
     assert any(m["address"] == MARKET for m in markets["results"])
     report["active_markets"] = markets["total"]
     assert json.loads(read(f"/petals/pendle/{chain}/markets/{MARKET}/info.json"))["address"] == MARKET
+    refused = cli("vfs", "cat", f"/petals/pendle/{chain}/markets/{UNCURATED}/info.json", check=False)
+    assert refused.returncode != 0, refused.stdout[-600:]
+    assert "not on Pendle's curated list" in refused.stderr + refused.stdout, refused.stderr[-600:]
     passed("live Pendle discovery and market API through WASM")
     complete(launch_field(cli("wallet", "new", wallet).stdout, "ceremony_url"))
     write(f"/wallets/{wallet}/new", {"request_id": "account-one"})
