@@ -89,6 +89,42 @@ pub fn market<H: Host>(host: &mut H, chain: Chain, market: &str) -> Result<Marke
 }
 
 #[derive(Deserialize)]
+struct CuratedPage {
+    results: Vec<CuratedMarket>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CuratedMarket {
+    chain_id: u64,
+    address: String,
+}
+/// Refuses a market that is not on Pendle's curated list. Anyone can create a
+/// market through Pendle's factory, and its SY can keep what is deposited, so
+/// the onchain factory check alone does not make a market safe to trade. The
+/// query leaves out `isActive`, so a matured market can still be redeemed.
+pub fn curated<H: Host>(host: &mut H, chain: Chain, market: &str) -> Result<()> {
+    let expected = address(market)?;
+    let url = format!(
+        "{API}/v2/markets/all?chainId={id}&ids={id}-{expected:#x}",
+        id = chain.id()
+    );
+    let page: CuratedPage = serde_json::from_slice(&fetch(host, "GET", url, None)?)
+        .map_err(|_| "Pendle market list schema changed")?;
+    match page.results.as_slice() {
+        [] => Err(format!(
+            "market {expected:#x} is not on Pendle's curated list"
+        )),
+        [listed]
+            if listed.chain_id == chain.id()
+                && address(&listed.address).is_ok_and(|listed| listed == expected) =>
+        {
+            Ok(())
+        }
+        _ => Err("Pendle's curated list answered for another market".into()),
+    }
+}
+
+#[derive(Deserialize)]
 struct MarketPage {
     total: usize,
     results: Vec<ListedMarket>,

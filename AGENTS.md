@@ -34,6 +34,11 @@ unknown selectors, aggregator callbacks, embedded limit orders and native-token
 routes. All signing and broadcasting belong to Bloom's transaction outbox.
 Never add a local private key or direct Broker/Signer client.
 
+Anyone can create a market through Pendle's factory, so drafts and every
+confirm refuse a market that is not on Pendle's curated list (`api::curated`).
+Never rely on the factory check alone, or on the market endpoint's 404 for an
+uncurated market, which Pendle does not document.
+
 An accepted write, API quote or successful simulation is not execution proof.
 Unknown staging/submission outcomes require reconciliation. Never generate a
 new outbox entry to work around an ambiguous existing one.

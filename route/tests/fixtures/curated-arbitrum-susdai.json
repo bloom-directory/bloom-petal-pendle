@@ -1,0 +1,202 @@
+{
+  "total": 1,
+  "limit": 20,
+  "skip": 0,
+  "results": [
+    {
+      "name": "sUSDai",
+      "protocol": "USD.AI",
+      "icon": "https://storage.googleapis.com/prod-pendle-bucket-a/images/uploads/03d74b71-f1ab-4c86-a7bf-c08488e55901.svg",
+      "address": "0xf86119a39f8654f38acbbd5488bd83f3f51983c8",
+      "expiry": "2027-02-25T00:00:00.000Z",
+      "pt": "42161-0xe9d07c2a3588b9a25edd55664be44ecfe5f92fce",
+      "yt": "42161-0x9adc5ff64705ccedf6ba61cdac124a720c0ff902",
+      "sy": "42161-0x30ccf4bbee313fcd19f3e295b3ba2920a24e2f62",
+      "underlyingAsset": "42161-0x0b2b2b2076d95dda7817e785989fe353fe955ef9",
+      "accountingAsset": "42161-0x0a1a1a107e45b7ced86833863f482bc5f4ed82ef",
+      "rewardTokens": [
+        "42161-0x0c880f6761f1af8d9aa9c466984b80dab9a8c9e8"
+      ],
+      "inputTokens": [
+        "42161-0x0a1a1a107e45b7ced86833863f482bc5f4ed82ef",
+        "42161-0x0b2b2b2076d95dda7817e785989fe353fe955ef9",
+        "42161-0x46850ad61c2b7d64d08c9c754f45254596696984"
+      ],
+      "outputTokens": [
+        "42161-0x0b2b2b2076d95dda7817e785989fe353fe955ef9"
+      ],
+      "details": {
+        "liquidity": 4383041.297021048,
+        "totalTvl": 24771358.560917005,
+        "tradingVolume": 49966.26679317092,
+        "underlyingApy": 0.07058751404389652,
+        "swapFeeApy": 0.0062649969653760795,
+        "pendleApy": 0.007277244116966426,
+        "ytFloatingApy": -0.6026916469666055,
+        "impliedApy": 0.09064966821606046,
+        "feeRate": 0.002724660590421868,
+        "yieldRange": {
+          "min": 0.030000000000000002,
+          "max": 0.12999999999999998
+        },
+        "aggregatedApy": 0.09630877218319449,
+        "maxBoostedApy": 0.10722463835864413,
+        "totalPt": 2730568.088803093,
+        "totalSy": 1531727.4071331553,
+        "totalSupply": 1993135.3435237028,
+        "totalActiveSupply": 1993135.3435237028,
+        "ytRoi": -0.2361857275063406,
+        "ptRoi": 0.025652175733439586
+      },
+      "isNew": false,
+      "isPrime": false,
+      "timestamp": "2026-06-15T18:59:30.000Z",
+      "categoryIds": [
+        "stables",
+        "rwa",
+        "points"
+      ],
+      "isVolatile": false,
+      "underlyingRewardApyBreakdown": [],
+      "lpRewardApyBreakdown": [],
+      "ytApyBreakdown": {
+        "categories": [
+          {
+            "label": "Protocol Yield",
+            "apy": 0.07058751404389652,
+            "items": [
+              {
+                "id": "42161-0x0a1a1a107e45b7ced86833863f482bc5f4ed82ef",
+                "apy": 0.07058751404389652,
+                "tags": [
+                  "INTEREST",
+                  "AUTO"
+                ],
+                "source": "CONTRACT"
+              }
+            ]
+          }
+        ]
+      },
+      "lpApyBreakdown": {
+        "categories": [
+          {
+            "label": "Underlying Yield",
+            "apy": 0.02773635888253307,
+            "items": [
+              {
+                "id": "42161-0x0a1a1a107e45b7ced86833863f482bc5f4ed82ef",
+                "apy": 0.02773635888253307,
+                "tags": [
+                  "INTEREST",
+                  "AUTO"
+                ],
+                "source": "CONTRACT"
+              }
+            ]
+          },
+          {
+            "label": "PT Fixed Yield",
+            "apy": 0.05503017142149092,
+            "items": [
+              {
+                "id": "42161-0x0a1a1a107e45b7ced86833863f482bc5f4ed82ef",
+                "apy": 0.05503017142149092,
+                "tags": [
+                  "FIXED_YIELD",
+                  "AUTO"
+                ]
+              }
+            ]
+          },
+          {
+            "label": "LP Rewards",
+            "apy": 0.013542241082342506,
+            "items": [
+              {
+                "id": "42161-0xf86119a39f8654f38acbbd5488bd83f3f51983c8",
+                "apy": 0.0062649969653760795,
+                "tags": [
+                  "SWAP_FEE",
+                  "AUTO"
+                ]
+              },
+              {
+                "id": "PENDLE",
+                "apy": 0.0072772441169664265,
+                "tags": [
+                  "INCENTIVE",
+                  "BOOSTABLE"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "chainId": 42161,
+      "points": [
+        {
+          "key": "USD.AI",
+          "type": "multiplier",
+          "pendleAsset": "basic",
+          "value": 12
+        }
+      ],
+      "limitOrderIncentive": {
+        "amountPerSec": 0.0001549687256275696,
+        "impliedApy": 0.09064966821606046,
+        "buyYtApr": 0.061417473720237266,
+        "sellPtApr": 0.0015755752228908723,
+        "sellYtApr": 1,
+        "buyPtApr": 0.037155312334202044,
+        "long": {
+          "mode": "RELATIVE",
+          "amountPerSec": 7.236858235439791e-05,
+          "minApy": 0.08747692982849835,
+          "maxApy": 0.09382240660362258
+        },
+        "short": {
+          "mode": "RELATIVE",
+          "amountPerSec": 8.260014327317169e-05,
+          "minApy": 0.08664966821606046,
+          "maxApy": 0.09464966821606047
+        }
+      },
+      "pendleEmission": {
+        "totalIncentive": 483.7035958670607,
+        "tvlIncentive": 54.48285756185958,
+        "feeIncentive": 335.49565304564703,
+        "discretionaryIncentive": 0,
+        "cobribingIncentive": 0,
+        "limitOrderIncentive": 93.72508525955409
+      },
+      "marketInfo": {
+        "assetDescription": "<p>USD.AI is a synthetic dollar protocol designed to finance the physical infrastructure of AI (Compute) and other emerging sectors. sUSDai is the yield-bearing token backed by income-generating Compute or other infrastructure assets. These assets are inherently less liquid than stablecoins, so holders accrue yield for the added risk and are also subject to redemption periods.</p>\n<p>The pool will also earn additional points which entitles users to airdrop during USD.AI TGE.</p>",
+        "riskInvolved": "<p>The pool could generate negative yield if the loan that has been originated has defaulted. In this situation, the collateral will be sold to recoup the value of the loan, which may be lower than the remaining principal on the original loan - which leads to negative yield. (from underlying protocol)</p>",
+        "importantQuirks": "<ul>\n<li>The minting cap for USDai has been reached. Users will swap their input token into USDai via a DEX to obtain USDai. <strong>Be aware of potential price impact when swapping.</strong></li>\n<li>Points earned for this pool entitles you to airdrop for USD.AI tokens, rather than allocation to purchase USD.AI tokens during TGE. Refer <a href=\"https://docs.usd.ai/app-guide/allo-points\">here</a> for more details.</li>\n<li>No KYC is required for airdrop earned from this pool.</li>\n</ul>\n",
+        "initiatedBy": "USD.AI",
+        "conversionRate": {
+          "rate": 1.125014213757702,
+          "fromUnit": "sUSDai",
+          "toUnit": "USDai staked in USD.AI"
+        },
+        "utilizedProtocols": [
+          {
+            "id": "usd.ai",
+            "url": "https://usd.ai/",
+            "name": "USD.AI",
+            "imageUrl": "https://storage.googleapis.com/prod-pendle-bucket-a/images/uploads/d4816a29-2263-4b64-be5d-ff89e1614932.svg"
+          }
+        ],
+        "deposit": {
+          "url": "https://app.usd.ai/stake",
+          "description": "Pendle Router automatically finds the best route between native minting and DEX swapping"
+        },
+        "withdrawal": {
+          "url": "https://app.usd.ai/unstake",
+          "description": "Pendle Router automatically finds the best route between native withdrawal and DEX swapping"
+        }
+      }
+    }
+  ]
+}

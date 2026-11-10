@@ -81,6 +81,11 @@ struct Fake {
     http_calls: usize,
     http_response: Option<HttpResponse>,
     pages: VecDeque<Value>,
+    /// Pendle's curated list holds every market asked for when true, and none
+    /// when false.
+    curated: bool,
+    /// Served for curated-list queries in place of `curated`'s answer.
+    curated_answer: Option<Value>,
     portfolio: Value,
     requests: Vec<HttpRequest>,
     reads: Vec<(Chain, String)>,
@@ -139,6 +144,8 @@ impl Default for Fake {
             http_calls: 0,
             http_response: None,
             pages: VecDeque::new(),
+            curated: true,
+            curated_answer: None,
             portfolio: json!({"positions": []}),
             requests: vec![],
             reads: vec![],
@@ -232,6 +239,14 @@ impl Host for Fake {
         }
         let payload = if req.method == "POST" {
             self.quote.clone()
+        } else if let Some((_, id)) = req.url.split_once("&ids=") {
+            // `<chain id>-<market>`, answered with the fields Pendle lists.
+            let (chain_id, address) = id.split_once('-').unwrap();
+            let listed = json!({"chainId": chain_id.parse::<u64>().unwrap(), "address": address});
+            self.curated_answer.clone().unwrap_or_else(|| {
+                let results = if self.curated { vec![listed] } else { vec![] };
+                json!({"total": results.len(), "limit": 20, "skip": 0, "results": results})
+            })
         } else if req.url.contains("/v2/markets/all") {
             self.pages.pop_front().expect("unexpected market page")
         } else if req.url.contains("/dashboard/positions/") {
@@ -795,7 +810,8 @@ fn factory_and_maturity_checks_run_before_quotes() {
             ..Fake::default()
         };
         assert!(workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).is_err());
-        assert_eq!(h.http_calls, 1);
+        // The curated list and the market, but no quote.
+        assert_eq!(h.http_calls, 2);
     }
 }
 #[test]
@@ -884,7 +900,7 @@ fn native_token_drafts_are_refused() {
         draft(&mut h, &r).unwrap_err(),
         "asset is not natively supported by this market's SY; aggregator routes are disabled"
     );
-    assert_eq!(h.http_calls, 1, "no quote is requested");
+    assert_eq!(h.http_calls, 2, "no quote is requested");
     assert!(h.store.is_empty());
 }
 #[test]
@@ -961,11 +977,14 @@ fn ethereum_draft_uses_chain_one_end_to_end() {
     assert_eq!(
         urls,
         [
+            format!(
+                "{API}/v2/markets/all?chainId=1&ids=1-0x13285bcbc27f92b47b4edb99d744c07b48c977c0"
+            ),
             format!("{API}/v1/1/markets/0x13285bcbc27f92b47b4edb99d744c07b48c977c0"),
             format!("{API}/v3/sdk/1/convert"),
         ]
     );
-    let quote_body: Value = serde_json::from_slice(&h.requests[1].body).unwrap();
+    let quote_body: Value = serde_json::from_slice(&h.requests[2].body).unwrap();
     assert_eq!(quote_body["useLimitOrder"], json!(false));
     assert_eq!(quote_body["enableAggregator"], json!(false));
 
@@ -1155,7 +1174,7 @@ fn arbitrum_market_data_from_the_ethereum_url_is_refused() {
     )
     .unwrap_err();
     assert_eq!(error, "Pendle market identity mismatch");
-    assert_eq!(h.http_calls, 1);
+    assert_eq!(h.http_calls, 2);
     assert!(h.store.is_empty());
 }
 #[test]
@@ -1166,7 +1185,7 @@ fn an_rpc_on_the_wrong_chain_is_refused() {
     };
     let error = workflow::create(&mut h, ETH, &account(), BUY, "one", &eth_body()).unwrap_err();
     assert_eq!(error, "Bloom's ethereum RPC does not report chain id 1");
-    assert_eq!(h.http_calls, 1, "no quote is requested");
+    assert_eq!(h.http_calls, 2, "no quote is requested");
     assert!(h.factory_calls.is_empty());
 
     // A chain repointed after the draft was made is caught at confirm.
@@ -1175,6 +1194,168 @@ fn an_rpc_on_the_wrong_chain_is_refused() {
     h.chain_id = Some(42161);
     assert!(workflow::confirm(&mut h, ETH, &account(), BUY, "one", b"confirm", PKG).is_err());
     assert!(h.staged.is_empty());
+}
+
+/// An Arbitrum market from Pendle's factory that Pendle has not curated: a
+/// "USDai" market on another SY than the curated USDai market's.
+const LOOKALIKE: &str = "0x3e510adb77ddb7a5c079c60e94711a20208bd588";
+fn recorded(body: &[u8]) -> Option<HttpResponse> {
+    Some(HttpResponse {
+        status: 200,
+        headers: vec![],
+        body: body.to_vec(),
+    })
+}
+fn not_curated(market: &str) -> String {
+    format!("market {market} is not on Pendle's curated list")
+}
+#[test]
+fn an_uncurated_market_is_refused_before_anything_else_is_read() {
+    let mut h = Fake {
+        http_response: recorded(include_bytes!(
+            "fixtures/curated-arbitrum-usdai-lookalike.json"
+        )),
+        ..Fake::default()
+    };
+    let mut r = request();
+    r.market = LOOKALIKE.into();
+    let error = workflow::create(
+        &mut h,
+        ARB,
+        &account(),
+        BUY,
+        "one",
+        &serde_json::to_vec(&r).unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(error, not_curated(LOOKALIKE));
+    let urls: Vec<_> = h.requests.iter().map(|r| r.url.as_str()).collect();
+    assert_eq!(
+        urls,
+        [format!(
+            "{API}/v2/markets/all?chainId=42161&ids=42161-{LOOKALIKE}"
+        )]
+    );
+    assert!(h.reads.is_empty() && h.store.is_empty());
+}
+#[test]
+fn pendles_answer_vouches_only_for_the_market_asked_for() {
+    let answer = || recorded(include_bytes!("fixtures/curated-arbitrum-susdai.json"));
+    let mut h = Fake {
+        http_response: answer(),
+        ..Fake::default()
+    };
+    api::curated(&mut h, ARB, &market().address).unwrap();
+    let another = "Pendle's curated list answered for another market";
+    for (chain, asked) in [(ARB, LOOKALIKE.to_owned()), (ETH, market().address)] {
+        h.http_response = answer();
+        assert_eq!(api::curated(&mut h, chain, &asked).unwrap_err(), another);
+    }
+    let entry = |chain_id: u64, address: &str| json!({"chainId": chain_id, "address": address});
+    for (results, error) in [
+        (
+            json!([entry(42161, &market().address), entry(42161, LOOKALIKE)]),
+            another,
+        ),
+        (json!([entry(42161, "0x1234")]), another),
+        (
+            json!([{"address": market().address}]),
+            "Pendle market list schema changed",
+        ),
+    ] {
+        let mut h = Fake {
+            curated_answer: Some(json!({"total": 1, "results": results})),
+            ..Fake::default()
+        };
+        assert_eq!(
+            api::curated(&mut h, ARB, &market().address).unwrap_err(),
+            error
+        );
+    }
+    // Without an answer, nothing is drafted.
+    let mut h = Fake {
+        http_response: Some(HttpResponse {
+            status: 503,
+            headers: vec![],
+            body: vec![],
+        }),
+        ..Fake::default()
+    };
+    let error = workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap_err();
+    assert!(error.starts_with("Pendle returned HTTP 503"), "{error}");
+    assert!(h.store.is_empty());
+}
+#[test]
+fn a_matured_market_is_looked_up_without_the_active_filter() {
+    // Pendle drops a matured market from its active list, but not from its
+    // curated list, so it can still be redeemed.
+    let r = redeem_market();
+    let mut h = Fake {
+        expired: true,
+        market: r.clone(),
+        quote: redeem_quote(),
+        ..Fake::default()
+    };
+    let request = DraftInput {
+        market: r.address.clone(),
+        token: r.underlying_asset.address.clone(),
+        amount: "1000000000000000000".into(),
+        min_output: "1".into(),
+        slippage_bps: 10,
+        max_price_impact_bps: 100,
+    };
+    workflow::create(
+        &mut h,
+        ETH,
+        &account(),
+        Operation::RedeemPt,
+        "one",
+        &serde_json::to_vec(&request).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        h.requests[0].url,
+        format!("{API}/v2/markets/all?chainId=1&ids=1-{}", r.address)
+    );
+}
+#[test]
+fn confirm_refuses_a_market_pendle_has_dropped_since_the_draft() {
+    // Before anything is staged: nothing is staged.
+    let mut h = Fake::default();
+    workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
+    h.curated = false;
+    let error =
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err();
+    assert_eq!(error, not_curated(&market().address));
+    assert!(h.staged.is_empty());
+
+    // While a staged step awaits its owner approval: Bloom is not asked to
+    // send it, and it continues once Pendle lists the market again.
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.approved = true;
+    h.curated = false;
+    let confirms = h.confirms.len();
+    let error =
+        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err();
+    assert_eq!(error, not_curated(&market().address));
+    assert_eq!(h.confirms.len(), confirms);
+    h.curated = true;
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
+    assert_eq!(h.confirms.len(), confirms + 1);
+
+    // A step Bloom may already have sent is Bloom's to settle, listed or not.
+    let mut h = Fake::default();
+    staged_with_approval(&mut h);
+    h.files.insert(
+        outbox_path(ARB, "pending", "1-tx", "broadcast_attempted.json"),
+        json!({"tx_hash": "0xswap"}).to_string().into_bytes(),
+    );
+    h.approved = true;
+    h.curated = false;
+    let confirms = h.confirms.len();
+    workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
+    assert_eq!(h.confirms.len(), confirms + 1);
 }
 
 fn listed(n: u8, chain_id: u64) -> Value {
