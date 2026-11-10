@@ -996,8 +996,14 @@ fn advance<H: Host>(
     // stages, approves and signs nothing new, so nothing else is checked.
     if draft.steps[index].tx_hash.is_none() {
         // Recheck the curated list, chain, factory membership and maturity on
-        // every write: Pendle may drop a market after an incident.
-        api::curated(host, chain, &draft.request.market)?;
+        // every write: Pendle may drop a market after an incident. Until it
+        // lists the market again, a staged entry for this step holds its
+        // nonce, and Bloom stages later transactions behind it. A failed
+        // lookup is not Pendle's answer, so it gets no discard advice.
+        if let Some(refusal) = api::uncurated(host, chain, &draft.request.market)? {
+            let discard = discard_first(host, account, chain, draft.steps.get(index))?;
+            return Err(format!("{refusal}{discard}"));
+        }
         evm::verify_market(
             host,
             chain,

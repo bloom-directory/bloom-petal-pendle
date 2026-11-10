@@ -103,6 +103,12 @@ struct CuratedMarket {
 /// the onchain factory check alone does not make a market safe to trade. The
 /// query leaves out `isActive`, so a matured market can still be redeemed.
 pub fn curated<H: Host>(host: &mut H, chain: Chain, market: &str) -> Result<()> {
+    uncurated(host, chain, market)?.map_or(Ok(()), Err)
+}
+/// The refusal for a market Pendle answers is not on its curated list, or
+/// `None` when it is listed. An `Err` means Pendle gave no answer the Petal
+/// can use, so the market may still be listed.
+pub fn uncurated<H: Host>(host: &mut H, chain: Chain, market: &str) -> Result<Option<String>> {
     let expected = address(market)?;
     let url = format!(
         "{API}/v2/markets/all?chainId={id}&ids={id}-{expected:#x}",
@@ -111,14 +117,14 @@ pub fn curated<H: Host>(host: &mut H, chain: Chain, market: &str) -> Result<()> 
     let page: CuratedPage = serde_json::from_slice(&fetch(host, "GET", url, None)?)
         .map_err(|_| "Pendle market list schema changed")?;
     match page.results.as_slice() {
-        [] => Err(format!(
+        [] => Ok(Some(format!(
             "market {expected:#x} is not on Pendle's curated list"
-        )),
+        ))),
         [listed]
             if listed.chain_id == chain.id()
                 && address(&listed.address).is_ok_and(|listed| listed == expected) =>
         {
-            Ok(())
+            Ok(None)
         }
         _ => Err("Pendle's curated list answered for another market".into()),
     }

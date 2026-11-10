@@ -1329,8 +1329,9 @@ fn confirm_refuses_a_market_pendle_has_dropped_since_the_draft() {
     assert_eq!(error, not_curated(&market().address));
     assert!(h.staged.is_empty());
 
-    // While a staged step awaits its owner approval: Bloom is not asked to
-    // send it, and it continues once Pendle lists the market again.
+    // Once the owner may have approved a staged step: Bloom is not asked to
+    // send it, and it continues once Pendle lists the market again. Bloom
+    // may be signing it, so no discard is offered.
     let mut h = Fake::default();
     staged_with_approval(&mut h);
     h.approved = true;
@@ -1343,6 +1344,52 @@ fn confirm_refuses_a_market_pendle_has_dropped_since_the_draft() {
     h.curated = true;
     workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     assert_eq!(h.confirms.len(), confirms + 1);
+
+    // While the staged step's approval awaits its ceremony, the refusal names
+    // the file that discards its entry, which otherwise holds its nonce. A
+    // lookup that fails, or answers for another market, is not Pendle saying
+    // the market was dropped, so it offers no discard.
+    let awaiting = |answer: &dyn Fn(&mut Fake)| {
+        let mut h = Fake::default();
+        staged_with_approval(&mut h);
+        h.files.insert(
+            outbox_path(ARB, "pending", "1-tx", "approval_challenge.json"),
+            json!({"state": "awaiting_ceremony"})
+                .to_string()
+                .into_bytes(),
+        );
+        answer(&mut h);
+        let confirms = h.confirms.len();
+        let error =
+            workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err();
+        assert_eq!(h.confirms.len(), confirms);
+        error
+    };
+    assert_eq!(
+        awaiting(&|h| h.curated = false),
+        format!(
+            "{}; first discard its unsent outbox entry by writing `cancel` to /wallets/alice/0/chains/arbitrum/outbox/pending/1-tx/confirm",
+            not_curated(&market().address)
+        )
+    );
+    assert_eq!(
+        awaiting(&|h| {
+            h.http_response = Some(HttpResponse {
+                status: 503,
+                headers: vec![],
+                body: vec![],
+            })
+        }),
+        "Pendle returned HTTP 503; retry reads later; transaction outcomes require reconciliation"
+    );
+    assert_eq!(
+        awaiting(&|h| {
+            h.curated_answer = Some(json!({"total": 1, "results": [
+                {"chainId": 42161, "address": LOOKALIKE}
+            ]}))
+        }),
+        "Pendle's curated list answered for another market"
+    );
 
     // A step Bloom may already have sent is Bloom's to settle, listed or not.
     let mut h = Fake::default();

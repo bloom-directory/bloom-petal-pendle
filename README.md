@@ -19,7 +19,7 @@ All paths below are relative to `/petals/pendle/`. `<chain>` is `ethereum` or
 | --- | --- |
 | `status.json` | Supported chains and features, and the exact SDK revision |
 | `<chain>/markets.json` | Every active market on Pendle's curated list for the chain, as a compact summary (see below) |
-| `<chain>/markets/<market>/info.json` | Market identities, maturity, token symbols and decimals, accounting/underlying assets |
+| `<chain>/markets/<market>/info.json` | Market identities, maturity, token symbols and decimals, accounting/underlying assets, for a market on Pendle's curated list |
 | `<chain>/accounts/<wallet>/<index>/portfolio.json` | Pendle's indexed positions for the selected account address on this chain |
 | `<chain>/<operation>/<wallet>/<index>/<id>/draft.json` | Write a new immutable quote; read the input schema |
 | `<chain>/<operation>/<wallet>/<index>/<id>/plan.md` | Review inputs, receiver, minima, expiry and transaction steps |
@@ -49,13 +49,17 @@ market leaves `markets.json`. Its `marketId` there is
 or `closedPositions`. Never take one from a link or a message.
 Anyone can create a Pendle market through Pendle's factory, and a malicious
 SY can keep what is deposited. The onchain factory check proves only that a
-market came from that factory, not that Pendle reviewed it. So a draft and
-every `confirm` look the market up in Pendle's curated list, and refuse one
-that is not on it: `market <address> is not on Pendle's curated list`. The
-lookup leaves out `isActive`, so a matured market can still be redeemed. A
-market Pendle drops after an incident is refused at the next `confirm`.
-Reading `draft.json` gives the same guidance, with this chain's and
-account's paths.
+market came from that factory, not that Pendle reviewed it. So `info.json`,
+a draft and every `confirm` look the market up in Pendle's curated list, and
+refuse one that is not on it: `market <address> is not on Pendle's curated
+list`. The lookup leaves out `isActive`, so a matured market can still be
+redeemed. A market Pendle drops after an incident is refused at the next
+`confirm`. If that step's staged entry is unsent and its owner approval
+still awaits its ceremony, the refusal also names the file that discards
+the entry, which holds its nonce until then (see below). A failed lookup
+is not Pendle's answer, so its error offers no discard. Reading
+`draft.json` gives the same guidance, with this chain's and account's
+paths.
 
 Draft body (all amounts are decimal strings in base units):
 
@@ -84,8 +88,8 @@ from the underlying asset. API APYs and expected amounts remain estimates.
 
 Reads use `GET /core/v2/markets/all` with chain and active filters and bounded
 pagination, `GET /core/v1/<chain id>/markets/<market>`, and
-`GET /core/v1/dashboard/positions/database/<account-address>`. Drafts and
-confirms check a market with
+`GET /core/v1/dashboard/positions/database/<account-address>`. `info.json`,
+drafts and confirms check a market with
 `GET /core/v2/markets/all?chainId=<chain id>&ids=<chain id>-<market>`, which
 is empty for a market Pendle has not curated. The positions
 endpoint covers every chain; the Petal keeps only the selected chain's entries.
