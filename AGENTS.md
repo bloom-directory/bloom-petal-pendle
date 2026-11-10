@@ -35,10 +35,13 @@ routes. All signing and broadcasting belong to Bloom's transaction outbox.
 Never add a local private key or direct Broker/Signer client.
 
 Anyone can create a market through Pendle's factory, so `info.json`, drafts
-and every confirm refuse a market that is not on Pendle's curated list
-(`api::curated`, or `api::uncurated` where the refusal needs more advice).
-Never rely on the factory check alone, or on the market endpoint's 404 for an
-uncurated market, which Pendle does not document.
+and every confirm of a buy refuse a market that is not on Pendle's curated
+list (`api::curated`, or `api::uncurated` where the refusal needs more
+advice). That includes a buy Bloom may already have sent: never ask Bloom to
+send it again. A sell or redemption drafted before Pendle drops a market may
+finish, since it deposits nothing. Never rely on the factory check alone, or
+on the market endpoint's 404 for an uncurated market, which Pendle does not
+document.
 
 An accepted write, API quote or successful simulation is not execution proof.
 Unknown staging/submission outcomes require reconciliation. Never generate a

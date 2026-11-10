@@ -992,15 +992,41 @@ fn advance<H: Host>(
     if draft.steps[index].state == "staging_unknown" {
         return claim(host, &mut draft, account, chain, op, id, index);
     }
+    // Pendle may drop a market after an incident, so the curated list gates
+    // every buy up to the moment the Petal asks Bloom to send it. A sell or
+    // redemption drafted before the drop can still finish: it deposits
+    // nothing, and its encoded minimum bounds what it pays.
+    let deposit = op == Operation::BuyPt;
     // A step Bloom may already have sent is Bloom's to settle: confirming it
-    // stages, approves and signs nothing new, so nothing else is checked.
-    if draft.steps[index].tx_hash.is_none() {
-        // Recheck the curated list, chain, factory membership and maturity on
-        // every write: Pendle may drop a market after an incident. Until it
-        // lists the market again, a staged entry for this step holds its
-        // nonce, and Bloom stages later transactions behind it. A failed
-        // lookup is not Pendle's answer, so it gets no discard advice.
-        if let Some(refusal) = api::uncurated(host, chain, &draft.request.market)? {
+    // stages, approves and signs nothing new, so nothing else is checked,
+    // except that a buy is not sent again into a market Pendle has dropped.
+    if let Some(hash) = draft.steps[index].tx_hash.clone() {
+        if deposit
+            && index + 1 == draft.steps.len()
+            && let Some(refusal) = api::uncurated(host, chain, &draft.request.market)?
+        {
+            let cancel = draft.steps[index]
+                .outbox_id
+                .as_deref()
+                .map(|id| outbox_entry(account, chain, "pending", id))
+                .transpose()?
+                .map(|dir| {
+                    format!(
+                        "; if it is not, the owner can replace it with a same-nonce cancel by writing `y` to /{dir}/cancel"
+                    )
+                })
+                .unwrap_or_default();
+            return Err(format!(
+                "{refusal}, and Bloom may already have sent this step's transaction {hash}: check it on chain. Until Pendle lists the market again, the Petal does not ask Bloom to send it again{cancel}"
+            ));
+        }
+    } else {
+        // Recheck the chain, factory membership and maturity on every write,
+        // and the curated list for a buy. Until Pendle lists a dropped
+        // market again, a staged entry for this step holds its nonce, and
+        // Bloom stages later transactions behind it. A failed lookup is not
+        // Pendle's answer, so it gets no discard advice.
+        if deposit && let Some(refusal) = api::uncurated(host, chain, &draft.request.market)? {
             let discard = discard_first(host, account, chain, draft.steps.get(index))?;
             return Err(format!(
                 "{refusal}; reconcile prior steps and create a new reviewed intent for a listed market{discard}"

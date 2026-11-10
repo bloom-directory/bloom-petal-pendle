@@ -50,18 +50,28 @@ or `closedPositions`. Never take one from a link or a message.
 Anyone can create a Pendle market through Pendle's factory, and a malicious
 SY can keep what is deposited. The onchain factory check proves only that a
 market came from that factory, not that Pendle reviewed it. So `info.json`,
-a draft and every `confirm` look the market up in Pendle's curated list, and
-refuse one that is not on it: `market <address> is not on Pendle's curated
-list`. The lookup leaves out `isActive`, so a matured market can still be
-redeemed. A market Pendle drops after an incident is refused at the next
+every draft and every `confirm` of a buy look the market up in Pendle's
+curated list, and refuse one that is not on it: `market <address> is not on
+Pendle's curated list`. The lookup leaves out `isActive`, so a matured
+market can still be redeemed.
+
+A buy into a market Pendle drops after an incident is refused at the next
 `confirm`, which says to create a new reviewed intent for a listed market.
 If that step's staged entry is unsent and its owner approval, if any, still
 awaits its ceremony, the refusal also names the file that discards the
 entry, which holds its nonce until then (see below). A failed or
 inconsistent lookup is not Pendle's answer, so its error offers no
-discard. There is no override: a position in a market Pendle drops cannot
-be sold or redeemed through the Petal. Reading `draft.json` gives the same
-guidance, with this chain's and account's paths.
+discard. If Bloom may already have sent the buy's Pendle transaction,
+`confirm` does not ask Bloom to send it again. The refusal gives its hash,
+to check on chain, and the file that replaces it with a same-nonce cancel
+if it has not landed. A transaction already broadcast can still land.
+
+A sell or redemption drafted before the drop can still be confirmed: it
+deposits nothing, and its encoded minimum bounds what it pays. A new one
+cannot be drafted. Pendle's own market and quote endpoints also refuse a
+market that is not on its curated list, so a holder must exit outside the
+Petal. Reading `draft.json` gives the same guidance, with this chain's and
+account's paths.
 
 Draft body (all amounts are decimal strings in base units):
 
@@ -91,7 +101,7 @@ from the underlying asset. API APYs and expected amounts remain estimates.
 Reads use `GET /core/v2/markets/all` with chain and active filters and bounded
 pagination, `GET /core/v1/<chain id>/markets/<market>`, and
 `GET /core/v1/dashboard/positions/database/<account-address>`. `info.json`,
-drafts and confirms check a market with
+drafts and a buy's confirms check a market with
 `GET /core/v2/markets/all?chainId=<chain id>&ids=<chain id>-<market>`, which
 is empty for a market Pendle has not curated. The positions
 endpoint covers every chain; the Petal keeps only the selected chain's entries.
@@ -118,10 +128,10 @@ encodes it. The expected output is Pendle's estimate, so `min_output` is the
 one floor that doesn't come from Pendle: set it yourself. Quotes are
 requested with Pendle's limit-order fills turned off. It refuses external
 aggregators, limit-order fills, native assets, unsupported selectors and
-noncanonical/trailing calldata. Every `confirm` repeats the curated-list,
-chain, factory, maturity and calldata checks before staging, and rebuilds
-each approval step from the intent: the token being spent, the router, and
-zero or the exact input.
+noncanonical/trailing calldata. Every `confirm` repeats the chain, factory,
+maturity and calldata checks before staging, and a buy's also repeats the
+curated-list check. Each rebuilds every approval step from the intent: the
+token being spent, the router, and zero or the exact input.
 
 The wallet's policy must allow each transaction's target on that chain: the
 Pendle router, the input token for a buy's approval, and the PT for a sell's
@@ -131,11 +141,14 @@ own entries.
 The plan contains exact-amount token approval steps only when allowance is
 insufficient. A nonzero insufficient allowance is reset first. Each write to
 `confirm.json` advances one step through Bloom's outbox. Complete the owner
-approval shown by Bloom, then retry the same path. Do not write to the
-`retry_path` that Bloom's `approval_challenge.json` names instead: it
-confirms the entry without the Petal's curated-list, factory, maturity and
-allowance rechecks. Status exposes the outbox IDs so the owner can inspect
-pending approvals in the selected account.
+approval shown by Bloom, then retry the same path. Do not confirm the entry
+through its own `confirm` file in Bloom's outbox, as Bloom's agent guide and
+the `retry_path` in its `approval_challenge.json` say: that sends it without
+the Petal's curated-list, factory, maturity and allowance rechecks
+([bloom#476](https://github.com/bloom-directory/bloom/issues/476)). Writing
+`cancel` there to discard an entry is a different matter (see below). Status
+exposes the outbox IDs so the owner can inspect pending approvals in the
+selected account.
 When Bloom refuses a confirm, the error carries Bloom's own reason, such as
 a nonce gap naming the entry that holds it, or a simulation revert. URLs,
 which may carry a provider key, and control and invisible formatting
@@ -245,8 +258,9 @@ signed, is `broadcast_unknown`.
 
 A lost submit reply can also leave the broadcast marker in a pending entry.
 The step stays `staged`, showing the marker's hash, asks for no ceremony and
-never expires: the next `confirm` lets Bloom settle that attempt, without
-rechecking the market. Only a transaction approval is cleared: a
+never expires: the next `confirm` lets Bloom settle that attempt. It
+rechecks only that a buy's Pendle transaction is still for a market on
+Pendle's curated list. Only a transaction approval is cleared: a
 wallet-policy approval Bloom asks for to settle it stays shown. When Bloom
 could not settle the attempt, it writes why in `reconcile_ambiguous.json`.
 It resends the same signed transaction only after a failed public resubmit,
