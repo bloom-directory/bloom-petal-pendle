@@ -89,6 +89,51 @@ pub fn market<H: Host>(host: &mut H, chain: Chain, market: &str) -> Result<Marke
 }
 
 #[derive(Deserialize)]
+struct CuratedPage {
+    total: usize,
+    results: Vec<CuratedMarket>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CuratedMarket {
+    chain_id: u64,
+    address: String,
+}
+/// Refuses a market that is not on Pendle's curated list. Anyone can create a
+/// market through Pendle's factory, and its SY can keep what is deposited, so
+/// the onchain factory check alone does not make a market safe to trade. The
+/// query leaves out `isActive`, so a matured market can still be redeemed.
+pub fn curated<H: Host>(host: &mut H, chain: Chain, market: &str) -> Result<()> {
+    uncurated(host, chain, market)?.map_or(Ok(()), Err)
+}
+/// The refusal for a market Pendle answers is not on its curated list, or
+/// `None` when it is listed. An `Err` means Pendle gave no answer the Petal
+/// can use, so the market may still be listed.
+pub fn uncurated<H: Host>(host: &mut H, chain: Chain, market: &str) -> Result<Option<String>> {
+    let expected = address(market)?;
+    let url = format!(
+        "{API}/v2/markets/all?chainId={id}&ids={id}-{expected:#x}",
+        id = chain.id()
+    );
+    let page: CuratedPage = serde_json::from_slice(&fetch(host, "GET", url, None)?)
+        .map_err(|_| "Pendle market list schema changed")?;
+    match page.results.as_slice() {
+        // An empty page counts as Pendle's answer only when its total agrees.
+        [] if page.total == 0 => Ok(Some(format!(
+            "market {expected:#x} is not on Pendle's curated list"
+        ))),
+        [listed]
+            if listed.chain_id == chain.id()
+                && address(&listed.address).is_ok_and(|listed| listed == expected) =>
+        {
+            Ok(None)
+        }
+        [_] => Err("Pendle's curated list answered for another market".into()),
+        _ => Err("Pendle's curated list gave an inconsistent answer".into()),
+    }
+}
+
+#[derive(Deserialize)]
 struct MarketPage {
     total: usize,
     results: Vec<ListedMarket>,
