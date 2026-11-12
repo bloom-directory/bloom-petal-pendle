@@ -1314,59 +1314,6 @@ fn pendles_answer_vouches_only_for_the_market_asked_for() {
     assert!(h.store.is_empty());
 }
 #[test]
-fn a_sell_or_redemption_drafted_before_a_drop_can_still_finish() {
-    // An exit deposits nothing, and its encoded minimum bounds what it pays,
-    // so once drafted it does not ask Pendle's curated list again.
-    let m = market();
-    let r = redeem_market();
-    for (chain, op, market, quote, token) in [
-        (
-            ARB,
-            Operation::SellPt,
-            m.clone(),
-            sell_quote(),
-            m.sy.address.clone(),
-        ),
-        (
-            ETH,
-            Operation::RedeemPt,
-            r.clone(),
-            redeem_quote(),
-            r.underlying_asset.address.clone(),
-        ),
-    ] {
-        let mut h = Fake {
-            expired: op == Operation::RedeemPt,
-            market: market.clone(),
-            quote,
-            approved: true,
-            ..Fake::default()
-        };
-        let request = DraftInput {
-            market: market.address.clone(),
-            token,
-            amount: "1000000000000000000".into(),
-            min_output: "1".into(),
-            slippage_bps: 10,
-            max_price_impact_bps: 100,
-        };
-        let body = serde_json::to_vec(&request).unwrap();
-        workflow::create(&mut h, chain, &account(), op, "one", &body).unwrap();
-        h.curated = false;
-        let requests = h.requests.len();
-        let steps = workflow::load(&mut h, chain, &account(), op, "one")
-            .unwrap()
-            .steps
-            .len();
-        for _ in 0..steps * 2 {
-            workflow::confirm(&mut h, chain, &account(), op, "one", b"confirm", PKG).unwrap();
-        }
-        let d = workflow::reconcile(&mut h, chain, &account(), op, "one").unwrap();
-        assert_eq!(d.state, "execution_confirmed", "{op:?}");
-        assert_eq!(h.requests.len(), requests, "{op:?}");
-    }
-}
-#[test]
 fn checksummed_and_uppercase_markets_match_pendles_lowercase_answer() {
     // Pendle lists addresses in lower case.
     for asked in [
@@ -1395,6 +1342,53 @@ fn checksummed_and_uppercase_markets_match_pendles_lowercase_answer() {
         let mut h = Fake::default();
         assert!(api::curated(&mut h, ARB, bad).is_err(), "{bad}");
         assert_eq!(h.http_calls, 0, "{bad}");
+    }
+}
+#[test]
+fn a_sell_or_redemption_is_refused_once_pendle_drops_the_market() {
+    // Pendle's router trusts the amount a market's SY reports, so an exit's
+    // minimum output does not protect it from a compromised SY.
+    let m = market();
+    let r = redeem_market();
+    for (chain, op, market, quote, token) in [
+        (
+            ARB,
+            Operation::SellPt,
+            m.clone(),
+            sell_quote(),
+            m.sy.address.clone(),
+        ),
+        (
+            ETH,
+            Operation::RedeemPt,
+            r.clone(),
+            redeem_quote(),
+            r.underlying_asset.address.clone(),
+        ),
+    ] {
+        let mut h = Fake {
+            expired: op == Operation::RedeemPt,
+            market: market.clone(),
+            quote,
+            ..Fake::default()
+        };
+        let request = DraftInput {
+            market: market.address.clone(),
+            token,
+            amount: "1000000000000000000".into(),
+            min_output: "1".into(),
+            slippage_bps: 10,
+            max_price_impact_bps: 100,
+        };
+        let body = serde_json::to_vec(&request).unwrap();
+        workflow::create(&mut h, chain, &account(), op, "one", &body).unwrap();
+        h.curated = false;
+        assert_eq!(
+            workflow::confirm(&mut h, chain, &account(), op, "one", b"confirm", PKG).unwrap_err(),
+            dropped(&market.address),
+            "{op:?}"
+        );
+        assert!(h.staged.is_empty(), "{op:?}");
     }
 }
 #[test]
@@ -1531,9 +1525,9 @@ fn confirm_refuses_a_market_pendle_has_dropped_since_the_draft() {
         discard("2-tx")
     );
 
-    // Once Bloom may have sent the swap, the Petal does not ask Bloom to send
-    // it again while Pendle has dropped the market, and says how to stop it.
-    let hash = format!("0x{}", "ab".repeat(32));
+    // Once Bloom may have sent the swap, it is Bloom's to settle even though
+    // Pendle has dropped the market: a Petal cannot read receipts, so it
+    // cannot tell a swap that landed from one the network never saw.
     h.files.remove(&outbox_path(
         ARB,
         "pending",
@@ -1542,36 +1536,17 @@ fn confirm_refuses_a_market_pendle_has_dropped_since_the_draft() {
     ));
     h.files.insert(
         outbox_path(ARB, "pending", "2-tx", "broadcast_attempted.json"),
-        json!({ "tx_hash": hash }).to_string().into_bytes(),
+        json!({ "tx_hash": format!("0x{}", "ab".repeat(32)) })
+            .to_string()
+            .into_bytes(),
     );
     h.approved = true;
-    let confirms = h.confirms.len();
-    assert_eq!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap_err(),
-        format!(
-            "{}, and Bloom may already have sent this step's transaction {hash}: check it on chain. Until Pendle lists the market again, the Petal does not ask Bloom to send it again; if it is not, the owner can replace it with a same-nonce cancel by writing `y` to /wallets/alice/0/chains/arbitrum/outbox/pending/2-tx/cancel",
-            not_curated(&market().address)
-        )
-    );
-    assert_eq!(h.confirms.len(), confirms);
-    // A failed lookup is not Pendle's answer, but it does not send it either.
-    h.http_response = Some(HttpResponse {
-        status: 503,
-        headers: vec![],
-        body: vec![],
-    });
-    assert!(
-        workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG)
-            .unwrap_err()
-            .starts_with("Pendle returned HTTP 503")
-    );
-    assert_eq!(h.confirms.len(), confirms);
-    h.curated = true;
+    let (confirms, requests) = (h.confirms.len(), h.requests.len());
     workflow::confirm(&mut h, ARB, &account(), BUY, "one", b"confirm", PKG).unwrap();
     assert_eq!(h.confirms.len(), confirms + 1);
+    assert_eq!(h.requests.len(), requests);
 
-    // An approval step Bloom may already have sent is Bloom's to settle,
-    // listed or not: it deposits nothing.
+    // So is an approval step Bloom may already have sent.
     let mut h = Fake::default();
     staged_with_approval(&mut h);
     h.files.insert(
