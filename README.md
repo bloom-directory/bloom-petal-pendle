@@ -137,10 +137,13 @@ The plan contains exact-amount token approval steps only when allowance is
 insufficient. A nonzero insufficient allowance is reset first. Each write to
 `confirm.json` advances one step through Bloom's outbox. Complete the owner
 approval shown by Bloom, then retry the same path. Do not confirm the entry
-through its own `confirm` file in Bloom's outbox, as Bloom's agent guide and
-the `retry_path` in its `approval_challenge.json` say: that sends it without
-the Petal's curated-list, factory, maturity and allowance rechecks
-([bloom#476](https://github.com/bloom-directory/bloom/issues/476)). Writing
+through its own `confirm` file in Bloom's outbox: that sends it without the
+Petal's curated-list, factory, maturity and allowance rechecks. Before 0.5.1,
+Bloom's agent guide and the `retry_path` in the entry's
+`approval_challenge.json` said to do exactly that
+([bloom#476](https://github.com/bloom-directory/bloom/issues/476)). From
+0.5.1, they send the retry back through `petals/pendle/` instead
+([bloom#479](https://github.com/bloom-directory/bloom/pull/479)). Writing
 `cancel` there to discard an entry is a different matter (see below). Status
 exposes the outbox IDs so the owner can inspect pending approvals in the
 selected account.
