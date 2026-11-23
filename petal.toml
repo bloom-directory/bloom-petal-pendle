@@ -2,7 +2,7 @@ schema = "bloom.petal.package.v1"
 name = "pendle"
 
 [consent]
-summary = "Read Pendle markets and the selected account's portfolio; prepare bounded PT buys, sells and maturity redemptions on Ethereum and Arbitrum. Token approvals and execution use Bloom's owner-approved transaction outbox. No agent key or standing trading authority."
+summary = "Read Pendle markets and the selected account's portfolio; prepare bounded PT buys, sells and maturity redemptions on Ethereum, Arbitrum, Base, BNB Chain, HyperEVM, Optimism, Robinhood Chain, Monad, Sonic, Mantle, Berachain, X Layer and Plasma. Token approvals and execution use Bloom's owner-approved transaction outbox. No agent key or standing trading authority."
 
 [caps]
 allowed = ["bloom:http", "bloom:store", "bloom:vfs.read", "bloom:chain", "bloom:tx.outbox"]
@@ -13,10 +13,40 @@ namespaces = ["state"]
 [[net.allow]]
 host = "api-v2.pendle.finance"
 methods = ["get"]
-paths = ["/core/v1/1/markets/*", "/core/v1/42161/markets/*", "/core/v2/markets/all", "/core/v1/dashboard/positions/database/*"]
+paths = [
+  "/core/v1/1/markets/*",
+  "/core/v1/42161/markets/*",
+  "/core/v1/8453/markets/*",
+  "/core/v1/56/markets/*",
+  "/core/v1/999/markets/*",
+  "/core/v1/10/markets/*",
+  "/core/v1/4663/markets/*",
+  "/core/v1/143/markets/*",
+  "/core/v1/146/markets/*",
+  "/core/v1/5000/markets/*",
+  "/core/v1/80094/markets/*",
+  "/core/v1/196/markets/*",
+  "/core/v1/9745/markets/*",
+  "/core/v2/markets/all",
+  "/core/v1/dashboard/positions/database/*",
+]
 
 [[net.allow]]
 host = "api-v2.pendle.finance"
 methods = ["post"]
-paths = ["/core/v3/sdk/1/convert", "/core/v3/sdk/42161/convert"]
+paths = [
+  "/core/v3/sdk/1/convert",
+  "/core/v3/sdk/42161/convert",
+  "/core/v3/sdk/8453/convert",
+  "/core/v3/sdk/56/convert",
+  "/core/v3/sdk/999/convert",
+  "/core/v3/sdk/10/convert",
+  "/core/v3/sdk/4663/convert",
+  "/core/v3/sdk/143/convert",
+  "/core/v3/sdk/146/convert",
+  "/core/v3/sdk/5000/convert",
+  "/core/v3/sdk/80094/convert",
+  "/core/v3/sdk/196/convert",
+  "/core/v3/sdk/9745/convert",
+]
 

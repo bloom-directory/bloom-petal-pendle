@@ -1,0 +1,49 @@
+{
+  "chainId": 999,
+  "address": "0x697dd29eed8e926205a08400a60d1578154c1a60",
+  "expiry": "2027-03-25T00:00:00.000Z",
+  "pt": {
+    "address": "0x9ccac9566fba516a5df00a23e81801b1f1cb57a8",
+    "symbol": "PT-kHYPE-25MAR2027",
+    "decimals": 18
+  },
+  "yt": {
+    "address": "0xd78bdbaa4cbd60bc9311faea101fd96caa889448",
+    "symbol": "YT-kHYPE-25MAR2027",
+    "decimals": 18
+  },
+  "sy": {
+    "address": "0x57fc55dff8ceca86ee94a6bf255af2f0ed90eb9e",
+    "symbol": "SY-kHYPE",
+    "decimals": 18
+  },
+  "accountingAsset": {
+    "address": "0x0000000000000000000000000000000000000000",
+    "symbol": "HYPE",
+    "decimals": 18
+  },
+  "underlyingAsset": {
+    "address": "0xfd739d4e423301ce9385c1fb8850539d657c296d",
+    "symbol": "kHYPE",
+    "decimals": 18
+  },
+  "inputTokens": [
+    {
+      "address": "0x0000000000000000000000000000000000000000",
+      "symbol": "HYPE",
+      "decimals": 18
+    },
+    {
+      "address": "0xfd739d4e423301ce9385c1fb8850539d657c296d",
+      "symbol": "kHYPE",
+      "decimals": 18
+    }
+  ],
+  "outputTokens": [
+    {
+      "address": "0xfd739d4e423301ce9385c1fb8850539d657c296d",
+      "symbol": "kHYPE",
+      "decimals": 18
+    }
+  ]
+}

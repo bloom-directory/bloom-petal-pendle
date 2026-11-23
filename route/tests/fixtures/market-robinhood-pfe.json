@@ -1,0 +1,44 @@
+{
+  "chainId": 4663,
+  "address": "0x892defbf510d9baa96dbd2a51b13e879a857a79b",
+  "expiry": "2026-12-10T00:00:00.000Z",
+  "pt": {
+    "address": "0xf9cd484f7e7799ae32b7f9a75e60c478fd1f0b6e",
+    "symbol": "PT-PFE-10DEC2026",
+    "decimals": 18
+  },
+  "yt": {
+    "address": "0x7600d0a61f83d7e4c4154c4664b19be6d9acf180",
+    "symbol": "YT-PFE-10DEC2026",
+    "decimals": 18
+  },
+  "sy": {
+    "address": "0x8c7454d4d64abd04fbf5f5ffe0dbcd5e3abcecf6",
+    "symbol": "SY-PFE",
+    "decimals": 18
+  },
+  "accountingAsset": {
+    "address": "0x7066a64c24e4206cd62e83bf198c1e7eb361f51e",
+    "symbol": "PFE",
+    "decimals": 18
+  },
+  "underlyingAsset": {
+    "address": "0x7066a64c24e4206cd62e83bf198c1e7eb361f51e",
+    "symbol": "PFE",
+    "decimals": 18
+  },
+  "inputTokens": [
+    {
+      "address": "0x7066a64c24e4206cd62e83bf198c1e7eb361f51e",
+      "symbol": "PFE",
+      "decimals": 18
+    }
+  ],
+  "outputTokens": [
+    {
+      "address": "0x7066a64c24e4206cd62e83bf198c1e7eb361f51e",
+      "symbol": "PFE",
+      "decimals": 18
+    }
+  ]
+}

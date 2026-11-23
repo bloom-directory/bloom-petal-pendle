@@ -66,6 +66,94 @@ fn tx() -> Transaction {
 fn eth_tx() -> Transaction {
     serde_json::from_value(eth_quote()["routes"][0]["tx"].clone()).unwrap()
 }
+/// One recorded public market and unsigned quote per chain. Where Pendle has
+/// active markets it buys PT with 1 SY of the most liquid one; elsewhere it
+/// redeems 1 PT of the latest matured market to SY. Ethereum and Arbitrum
+/// reuse their original fixtures.
+struct Recorded {
+    market: Market,
+    quote: Value,
+    op: Operation,
+}
+fn recorded(chain: Chain) -> Recorded {
+    let redeem = Operation::RedeemPt;
+    let (market, quote, op) = match chain {
+        Chain::Ethereum => {
+            return Recorded {
+                market: eth_market(),
+                quote: eth_quote(),
+                op: BUY,
+            };
+        }
+        Chain::Arbitrum => {
+            return Recorded {
+                market: market(),
+                quote: quote(),
+                op: BUY,
+            };
+        }
+        Chain::Base => (
+            include_str!("fixtures/market-base-googlc.json"),
+            include_str!("fixtures/quote-base-googlc.json"),
+            BUY,
+        ),
+        Chain::Bsc => (
+            include_str!("fixtures/market-bsc-clisbnb.json"),
+            include_str!("fixtures/quote-bsc-clisbnb.json"),
+            BUY,
+        ),
+        Chain::Hyperliquid => (
+            include_str!("fixtures/market-hyperliquid-khype.json"),
+            include_str!("fixtures/quote-hyperliquid-khype.json"),
+            BUY,
+        ),
+        Chain::Optimism => (
+            include_str!("fixtures/market-optimism-wsteth.json"),
+            include_str!("fixtures/quote-optimism-wsteth-redeem.json"),
+            redeem,
+        ),
+        Chain::Robinhood => (
+            include_str!("fixtures/market-robinhood-pfe.json"),
+            include_str!("fixtures/quote-robinhood-pfe.json"),
+            BUY,
+        ),
+        Chain::Monad => (
+            include_str!("fixtures/market-monad-susde.json"),
+            include_str!("fixtures/quote-monad-susde.json"),
+            BUY,
+        ),
+        Chain::Sonic => (
+            include_str!("fixtures/market-sonic-x33.json"),
+            include_str!("fixtures/quote-sonic-x33-redeem.json"),
+            redeem,
+        ),
+        Chain::Mantle => (
+            include_str!("fixtures/market-mantle-cmeth.json"),
+            include_str!("fixtures/quote-mantle-cmeth-redeem.json"),
+            redeem,
+        ),
+        Chain::Berachain => (
+            include_str!("fixtures/market-berachain-ibgt.json"),
+            include_str!("fixtures/quote-berachain-ibgt-redeem.json"),
+            redeem,
+        ),
+        Chain::Xlayer => (
+            include_str!("fixtures/market-xlayer-usdg.json"),
+            include_str!("fixtures/quote-xlayer-usdg.json"),
+            BUY,
+        ),
+        Chain::Plasma => (
+            include_str!("fixtures/market-plasma-susde.json"),
+            include_str!("fixtures/quote-plasma-susde.json"),
+            BUY,
+        ),
+    };
+    Recorded {
+        market: serde_json::from_str(market).unwrap(),
+        quote: serde_json::from_str(quote).unwrap(),
+        op,
+    }
+}
 
 struct Fake {
     store: BTreeMap<String, Vec<u8>>,
@@ -378,7 +466,7 @@ impl Host for Fake {
         if self.dedupe {
             let pending = self.staged.iter().enumerate().find(|(i, old)| {
                 let id = format!("{}-tx", i + 1);
-                let chain = if old.chain == "ethereum" { ETH } else { ARB };
+                let chain = Chain::parse(&old.chain).unwrap();
                 !self.mined.contains(&id)
                     && self
                         .files
@@ -402,7 +490,7 @@ impl Host for Fake {
             .stage_id
             .take()
             .unwrap_or_else(|| format!("{}-tx", self.staged.len()));
-        let chain = if tx.chain == "ethereum" { ETH } else { ARB };
+        let chain = Chain::parse(&tx.chain).unwrap();
         self.files.insert(
             outbox_path(chain, "pending", &id, "intent.json"),
             json!({
@@ -528,12 +616,52 @@ fn input_rejects_unknown_fields_and_noncanonical_amounts() {
 }
 #[test]
 fn bounds_and_ids_are_strict() {
-    assert_eq!(Chain::parse("arbitrum"), Ok(ARB));
-    assert_eq!(Chain::parse("ethereum"), Ok(ETH));
-    for name in ["base", "Ethereum", "mainnet", "1", ""] {
-        assert!(Chain::parse(name).is_err(), "{name}");
+    // Bloom's chain names, and the ids Pendle's deployment files carry.
+    let pinned = [
+        ("ethereum", 1),
+        ("arbitrum", 42161),
+        ("base", 8453),
+        ("bsc", 56),
+        ("hyperliquid", 999),
+        ("optimism", 10),
+        ("robinhood", 4663),
+        ("monad", 143),
+        ("sonic", 146),
+        ("mantle", 5000),
+        ("berachain", 80094),
+        ("xlayer", 196),
+        ("plasma", 9745),
+    ];
+    assert_eq!(Chain::ALL.map(|chain| (chain.name(), chain.id())), pinned);
+    for chain in Chain::ALL {
+        assert_eq!(Chain::parse(chain.name()), Ok(chain));
+        // Stored operations and status.json name the chain through serde.
+        assert_eq!(serde_json::to_value(chain).unwrap(), json!(chain.name()));
     }
-    assert_eq!((ETH.id(), ARB.id()), (1, 42161));
+    // Pendle lists Ink and Katana but has no router or market factory there;
+    // the rest are spellings Bloom does not use.
+    for name in [
+        "ink",
+        "katana",
+        "avalanche",
+        "Ethereum",
+        "bnb",
+        "hyperevm",
+        "x-layer",
+        "mainnet",
+        "1",
+        "",
+    ] {
+        assert_eq!(
+            Chain::parse(name),
+            Err(
+                "supported chains are ethereum, arbitrum, base, bsc, hyperliquid, optimism, \
+                 robinhood, monad, sonic, mantle, berachain, xlayer, plasma"
+                    .into()
+            ),
+            "{name}"
+        );
+    }
     for id in ["", "..", "a/b", "a?x", "a.b"] {
         assert!(operation_id(id).is_err());
     }
@@ -906,33 +1034,117 @@ fn sdk42_account_context_has_no_default() {
 
 #[test]
 fn pinned_factories_are_pendles_deployments() {
-    // `marketFactory` and `marketFactoryV3` to `V6`, and `router`, from
-    // pendle-core-v2-public `deployments/1-core.json` and `42161-core.json`,
-    // read on 2026-10-30.
-    assert_eq!(
-        factories(ETH),
-        [
-            "0x27b1dacd74688af24a64bd3c9c1b143118740784",
-            "0x1a6fcc85557bc4fb7b534ed835a03ef056552d52",
-            "0x3d75bd20c983edb5fd218a1b7e0024f1056c7a2f",
-            "0x6fcf753f2c67b83f7b09746bbc4fa0047b35d050",
-            "0x6d247b1c044fa1e22e6b04fa9f71baf99eb29a9f",
-        ]
-    );
-    assert_eq!(
-        factories(ARB),
-        [
-            "0xf5a7de2d276dbda3eef1b62a9e718eff4d29ddc8",
-            "0x2fcb47b58350cd377f94d3821e7373df60bd9ced",
-            "0xd9f5e9589016da862d2abce980a5a5b99a94f3e8",
-            "0xd29e76c6f15ada0150d10a1d3f45accd2098283b",
-            "0x49f2f7002669e0e4425fa0203975625ab4af3143",
-        ]
-    );
+    // `marketFactory` and `marketFactoryV3` to `V6`, whichever the chain has,
+    // and `router`, from pendle-core-v2-public `deployments/<chain id>-core.json`:
+    // Ethereum and Arbitrum read on 2026-10-30, the rest on 2026-11-23 at
+    // 82e69f0b2279c85f250a87cb0fe16a2b432ebb72.
+    let pinned: [(Chain, &[&str]); 13] = [
+        (
+            ETH,
+            &[
+                "0x27b1dacd74688af24a64bd3c9c1b143118740784",
+                "0x1a6fcc85557bc4fb7b534ed835a03ef056552d52",
+                "0x3d75bd20c983edb5fd218a1b7e0024f1056c7a2f",
+                "0x6fcf753f2c67b83f7b09746bbc4fa0047b35d050",
+                "0x6d247b1c044fa1e22e6b04fa9f71baf99eb29a9f",
+            ],
+        ),
+        (
+            ARB,
+            &[
+                "0xf5a7de2d276dbda3eef1b62a9e718eff4d29ddc8",
+                "0x2fcb47b58350cd377f94d3821e7373df60bd9ced",
+                "0xd9f5e9589016da862d2abce980a5a5b99a94f3e8",
+                "0xd29e76c6f15ada0150d10a1d3f45accd2098283b",
+                "0x49f2f7002669e0e4425fa0203975625ab4af3143",
+            ],
+        ),
+        (
+            Chain::Base,
+            &[
+                "0x59968008a703dc13e6beaeced644bdce4ee45d13",
+                "0x81e80a50e56d10c501ff17b5fe2f662bd9ea4590",
+            ],
+        ),
+        (
+            Chain::Bsc,
+            &[
+                "0x2bea6bfd8fbff45aa2a893eb3b6d85d10efcc70e",
+                "0xc40febf5a33b8c92b187d9be0fd3fe0ac2e4b07c",
+                "0x7d20e644d2a9e149e5be9be9ad2ab243a7835d37",
+                "0x7c7f73f7a320364dbb3c9aaa9bccd402040ee0f9",
+                "0x80ce46449df1c977f6ba60495125ce282f83ddfb",
+            ],
+        ),
+        (
+            Chain::Hyperliquid,
+            &[
+                "0x44a2ddf5339ffde8c23af4099a64def59b11b128",
+                "0xb5cd902cbef8461b8d6fa852f93784f090fd7beb",
+            ],
+        ),
+        (
+            Chain::Optimism,
+            &[
+                "0x17f100fb4be2707675c6439468d38249dd993d58",
+                "0x4a2b38b9cbd83c86f261a4d64c243795d4d44abc",
+                "0x73be47237f12f36203823bac9a4d80dc798b7015",
+                "0x02adf72d5d06a9c92136562eb237c07696833a84",
+                "0x95a937f7064c75c6bc257160088c0a9d58cca333",
+            ],
+        ),
+        (
+            Chain::Robinhood,
+            &["0x544bf81c855ae84c1e8b65d5e38770898d01eee2"],
+        ),
+        (
+            Chain::Monad,
+            &["0xa3cb62a49b66eb2536cf6f3c7ac82293784888a3"],
+        ),
+        (
+            Chain::Sonic,
+            &[
+                "0xfee31a6ec6ebefa0b5a594bf5b1139e3c6faa0fb",
+                "0x0ab3ae25c42a2f3748a018556989355d568fa6d6",
+            ],
+        ),
+        (
+            Chain::Mantle,
+            &[
+                "0xd228ec1f7d4313fe321fab511a872475d07f5ba6",
+                "0xca274a44a52241c1a8efb9f84bf492d8363929fc",
+                "0xcb02435716b0143d4ac1bdf370302d619e714126",
+                "0xa35ae21a593cb06959978e20b33db34163166c79",
+            ],
+        ),
+        (
+            Chain::Berachain,
+            &[
+                "0x8a09574b0401a856d89d1b583ee22e8cb0c5530b",
+                "0x6131ca76529250679cf9e2a3b07b135f20aab01a",
+            ],
+        ),
+        // X Layer's V6 factory has the same address as Robinhood's.
+        (
+            Chain::Xlayer,
+            &["0x544bf81c855ae84c1e8b65d5e38770898d01eee2"],
+        ),
+        (
+            Chain::Plasma,
+            &[
+                "0x28de02ac3c3f5ef427e55c321f73fdc7f192e8e4",
+                "0x84a240fa784e7f03cb99ba3716065961c5d0d531",
+            ],
+        ),
+    ];
+    assert_eq!(pinned.map(|(chain, _)| chain), Chain::ALL);
+    for (chain, expected) in pinned {
+        assert_eq!(factories(chain), expected, "{chain:?}");
+    }
     assert_eq!(ROUTER, "0x888888888889758f76e7103c6cbf23abbf58f946");
     // Visit all factories, rather than stopping after the first successful
     // fake response.
-    for (chain, m) in [(ARB, market()), (ETH, eth_market())] {
+    for (chain, m) in Chain::ALL.map(|chain| (chain, recorded(chain).market)) {
         let mut h = Fake {
             factory: false,
             market: m.clone(),
@@ -1010,6 +1222,92 @@ fn ethereum_draft_uses_chain_one_end_to_end() {
             "outbox-claims/ethereum/2-tx-1000000"
         ]
     );
+}
+/// Each chain's recorded quote passes the same checks and settles through the
+/// same steps, and every request, read, stage and claim uses that chain.
+#[test]
+fn every_chain_drafts_and_settles_its_recorded_quote() {
+    for chain in Chain::ALL {
+        let Recorded { market, quote, op } = recorded(chain);
+        let id = chain.id();
+        assert_eq!(market.chain_id, id, "{chain:?}");
+        let route = &quote["routes"][0];
+        // A buy pays with the quoted input; a redemption pays out the quoted output.
+        let token = if op == BUY {
+            &quote["inputs"][0]["token"]
+        } else {
+            &route["outputs"][0]["token"]
+        };
+        let request = DraftInput {
+            market: market.address.clone(),
+            token: token.as_str().unwrap().to_lowercase(),
+            amount: quote["inputs"][0]["amount"].as_str().unwrap().into(),
+            min_output: "1".into(),
+            slippage_bps: 10,
+            max_price_impact_bps: 100,
+        };
+        let mut h = Fake {
+            expired: op == Operation::RedeemPt,
+            market: market.clone(),
+            quote: quote.clone(),
+            ..Fake::default()
+        };
+        let body = serde_json::to_vec(&request).unwrap();
+        workflow::create(&mut h, chain, &account(), op, "one", &body)
+            .unwrap_or_else(|e| panic!("{chain:?}: {e}"));
+        let urls: Vec<_> = h.requests.iter().map(|r| r.url.clone()).collect();
+        assert_eq!(
+            urls,
+            [
+                format!("{API}/v1/{id}/markets/{}", market.address),
+                format!("{API}/v3/sdk/{id}/convert"),
+            ],
+            "{chain:?}"
+        );
+        assert_eq!(
+            h.factory_calls,
+            [address(factories(chain)[0]).unwrap()],
+            "{chain:?}"
+        );
+        let d = workflow::load(&mut h, chain, &account(), op, "one").unwrap();
+        assert_eq!(d.chain, chain);
+        let plan = workflow::plan(&d);
+        assert!(
+            plan.contains(&format!("Chain: {} ({id})", chain.name())),
+            "{plan}"
+        );
+
+        // Stage the approval, request the owner's approval, broadcast it,
+        // then stage and broadcast the router call.
+        for _ in 0..2 {
+            workflow::confirm(&mut h, chain, &account(), op, "one", b"confirm", PKG).unwrap();
+        }
+        h.approved = true;
+        for _ in 0..3 {
+            workflow::confirm(&mut h, chain, &account(), op, "one", b"confirm", PKG).unwrap();
+        }
+        let d = workflow::reconcile(&mut h, chain, &account(), op, "one").unwrap();
+        assert_eq!(d.state, "execution_confirmed", "{chain:?}");
+        assert_eq!(h.staged.len(), 2, "{chain:?}");
+        assert_eq!(address(&h.staged[1].to), address(ROUTER));
+        assert_eq!(h.staged[1].data_hex, route["tx"]["data"].as_str().unwrap());
+        assert!(h.staged.iter().all(|t| t.chain == chain.name()));
+        assert!(h.confirms.iter().all(|c| *c == chain));
+        assert!(h.inspects.iter().all(|c| *c == chain));
+        assert!(h.reads.iter().all(|(read, _)| *read == chain));
+        let prefix = format!("operations/{}/{}/", chain.name(), op.name());
+        assert_eq!(
+            h.store
+                .keys()
+                .filter(|k| !k.starts_with(&prefix))
+                .collect::<Vec<_>>(),
+            [
+                &format!("outbox-claims/{}/1-tx-1000000", chain.name()),
+                &format!("outbox-claims/{}/2-tx-1000000", chain.name()),
+            ],
+            "{chain:?}"
+        );
+    }
 }
 #[test]
 fn plan_prints_onchain_decimals_and_plain_api_strings() {

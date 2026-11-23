@@ -1,0 +1,44 @@
+{
+  "chainId": 8453,
+  "address": "0x9d91977cba597d910b1755b8acb3b616e3552f17",
+  "expiry": "2026-12-24T00:00:00.000Z",
+  "pt": {
+    "address": "0xe177d57cba726c7697e3845b8d0db8d593636842",
+    "symbol": "PT-GOOGLc-24DEC2026",
+    "decimals": 18
+  },
+  "yt": {
+    "address": "0x9e6a26bcdd73b7299526af6845590dc06907afe5",
+    "symbol": "YT-GOOGLc-24DEC2026",
+    "decimals": 18
+  },
+  "sy": {
+    "address": "0x24b6adcf6b5890006e67f71b03d706c1b8e0c8a3",
+    "symbol": "SY-GOOGLc",
+    "decimals": 18
+  },
+  "accountingAsset": {
+    "address": "0xa84fd9a6c622044c4228cbc36574e10d4ed9795f",
+    "symbol": "GOOGLc-scaled18",
+    "decimals": 18
+  },
+  "underlyingAsset": {
+    "address": "0xa84fd9a6c622044c4228cbc36574e10d4ed9795f",
+    "symbol": "GOOGLc-scaled18",
+    "decimals": 18
+  },
+  "inputTokens": [
+    {
+      "address": "0xb2000000000000000000002d0ba3164cc74f58b7",
+      "symbol": "GOOGLc",
+      "decimals": 8
+    }
+  ],
+  "outputTokens": [
+    {
+      "address": "0xb2000000000000000000002d0ba3164cc74f58b7",
+      "symbol": "GOOGLc",
+      "decimals": 8
+    }
+  ]
+}

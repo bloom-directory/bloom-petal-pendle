@@ -1,0 +1,49 @@
+{
+  "chainId": 56,
+  "address": "0x3974b474f33e00fe177b54206726a8d33fc87a57",
+  "expiry": "2027-04-15T00:00:00.000Z",
+  "pt": {
+    "address": "0x7dfbebc2bcbc3e754d64c12f0fbb64f59d9e96e0",
+    "symbol": "PT-clisBNB-15APR2027",
+    "decimals": 18
+  },
+  "yt": {
+    "address": "0x434d5f584c51c729b7dba69f3033ad37c41318f0",
+    "symbol": "YT-clisBNB-15APR2027",
+    "decimals": 18
+  },
+  "sy": {
+    "address": "0x27faf900007b4cba7803000251ec96bc69ff1bea",
+    "symbol": "SY-clisBNB",
+    "decimals": 18
+  },
+  "accountingAsset": {
+    "address": "0x0000000000000000000000000000000000000000",
+    "symbol": "BNB",
+    "decimals": 18
+  },
+  "underlyingAsset": {
+    "address": "0xb0b84d294e0c75a6abe60171b70edeb2efd14a1b",
+    "symbol": "slisBNB",
+    "decimals": 18
+  },
+  "inputTokens": [
+    {
+      "address": "0x0000000000000000000000000000000000000000",
+      "symbol": "BNB",
+      "decimals": 18
+    },
+    {
+      "address": "0xb0b84d294e0c75a6abe60171b70edeb2efd14a1b",
+      "symbol": "slisBNB",
+      "decimals": 18
+    }
+  ],
+  "outputTokens": [
+    {
+      "address": "0xb0b84d294e0c75a6abe60171b70edeb2efd14a1b",
+      "symbol": "slisBNB",
+      "decimals": 18
+    }
+  ]
+}

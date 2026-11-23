@@ -1,0 +1,44 @@
+{
+  "chainId": 5000,
+  "address": "0x6304ccbda63a7fb94919c705de54f9889f3ce047",
+  "expiry": "2025-09-18T00:00:00.000Z",
+  "pt": {
+    "address": "0x698eb002a4ec013a33286f7f2ba0be3970e66455",
+    "symbol": "PT-cmETH-18SEP2025",
+    "decimals": 18
+  },
+  "yt": {
+    "address": "0xaffe4b1b1eebe6dd1ee31ad27c88a918825c89f8",
+    "symbol": "YT-cmETH-18SEP2025",
+    "decimals": 18
+  },
+  "sy": {
+    "address": "0x2ab88ac7458faec2e952bb79cc1be6577bf63e70",
+    "symbol": "SY-cmETH",
+    "decimals": 18
+  },
+  "accountingAsset": {
+    "address": "0xdeaddeaddeaddeaddeaddeaddeaddeaddead1111",
+    "symbol": "WETH",
+    "decimals": 18
+  },
+  "underlyingAsset": {
+    "address": "0xe6829d9a7ee3040e1276fa75293bde931859e8fa",
+    "symbol": "cmETH",
+    "decimals": 18
+  },
+  "inputTokens": [
+    {
+      "address": "0xe6829d9a7ee3040e1276fa75293bde931859e8fa",
+      "symbol": "cmETH",
+      "decimals": 18
+    }
+  ],
+  "outputTokens": [
+    {
+      "address": "0xe6829d9a7ee3040e1276fa75293bde931859e8fa",
+      "symbol": "cmETH",
+      "decimals": 18
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "chainId": 80094,
+  "address": "0x850a9f099de3081fe88f8be6207492c52754acb5",
+  "expiry": "2025-12-25T00:00:00.000Z",
+  "pt": {
+    "address": "0xc2c7ded5837f911b7efe5984b52182036fd66a20",
+    "symbol": "PT-iBGT-25DEC2025",
+    "decimals": 18
+  },
+  "yt": {
+    "address": "0xbe79df1762891a043198f886dbbf2ff1729ef030",
+    "symbol": "YT-iBGT-25DEC2025",
+    "decimals": 18
+  },
+  "sy": {
+    "address": "0xc61c866b6fdc36f88ec368b969c6d7cb810cafa9",
+    "symbol": "SY-iBGT",
+    "decimals": 18
+  },
+  "accountingAsset": {
+    "address": "0xac03caba51e17c86c921e1f6cbfbdc91f8bb2e6b",
+    "symbol": "iBGT",
+    "decimals": 18
+  },
+  "underlyingAsset": {
+    "address": "0xac03caba51e17c86c921e1f6cbfbdc91f8bb2e6b",
+    "symbol": "iBGT",
+    "decimals": 18
+  },
+  "inputTokens": [
+    {
+      "address": "0xac03caba51e17c86c921e1f6cbfbdc91f8bb2e6b",
+      "symbol": "iBGT",
+      "decimals": 18
+    }
+  ],
+  "outputTokens": [
+    {
+      "address": "0xac03caba51e17c86c921e1f6cbfbdc91f8bb2e6b",
+      "symbol": "iBGT",
+      "decimals": 18
+    }
+  ]
+}

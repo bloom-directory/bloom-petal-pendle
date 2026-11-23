@@ -1,0 +1,44 @@
+{
+  "chainId": 9745,
+  "address": "0xdb96b529d19ff4a7d711e6e082172c77cfe88ed8",
+  "expiry": "2027-01-28T00:00:00.000Z",
+  "pt": {
+    "address": "0x257561233419039bec3a28be717d14b4f490883d",
+    "symbol": "PT-sUSDE-28JAN2027",
+    "decimals": 18
+  },
+  "yt": {
+    "address": "0x40eb4a62acf1fa0676732b62c4e55548ee7b819f",
+    "symbol": "YT-sUSDE-28JAN2027",
+    "decimals": 18
+  },
+  "sy": {
+    "address": "0x9838b0450e311962aed969ba7d0fe0bb9d8620eb",
+    "symbol": "SY-sUSDE",
+    "decimals": 18
+  },
+  "accountingAsset": {
+    "address": "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34",
+    "symbol": "USDe",
+    "decimals": 18
+  },
+  "underlyingAsset": {
+    "address": "0x211cc4dd073734da055fbf44a2b4667d5e5fe5d2",
+    "symbol": "sUSDe",
+    "decimals": 18
+  },
+  "inputTokens": [
+    {
+      "address": "0x211cc4dd073734da055fbf44a2b4667d5e5fe5d2",
+      "symbol": "sUSDe",
+      "decimals": 18
+    }
+  ],
+  "outputTokens": [
+    {
+      "address": "0x211cc4dd073734da055fbf44a2b4667d5e5fe5d2",
+      "symbol": "sUSDe",
+      "decimals": 18
+    }
+  ]
+}

@@ -14,32 +14,88 @@ pub const ROUTER: &str = "0x888888888889758f76e7103c6cbf23abbf58f946";
 pub const API: &str = "https://api-v2.pendle.finance/core";
 pub const SDK_REV: &str = "7dd2722db5de305dd63ca4ed03591f3ab82fa40b";
 
-/// A supported chain. The name is Bloom's chain name. The id is pinned here;
+/// A supported chain: every chain where Pendle has deployed its router and a
+/// market factory. The name is Bloom's chain name. The id is pinned here;
 /// live `eth_chainId` reads only confirm it.
+///
+/// Bloom ships the first seven in its default config. The rest work once the
+/// operator adds them to Bloom's `config.toml` under these names.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Chain {
     Ethereum,
     Arbitrum,
+    Base,
+    Bsc,
+    Hyperliquid,
+    Optimism,
+    Robinhood,
+    Monad,
+    Sonic,
+    Mantle,
+    Berachain,
+    Xlayer,
+    Plasma,
 }
 impl Chain {
-    pub const ALL: [Self; 2] = [Self::Ethereum, Self::Arbitrum];
+    pub const ALL: [Self; 13] = [
+        Self::Ethereum,
+        Self::Arbitrum,
+        Self::Base,
+        Self::Bsc,
+        Self::Hyperliquid,
+        Self::Optimism,
+        Self::Robinhood,
+        Self::Monad,
+        Self::Sonic,
+        Self::Mantle,
+        Self::Berachain,
+        Self::Xlayer,
+        Self::Plasma,
+    ];
     pub fn parse(value: &str) -> Result<Self> {
         Self::ALL
             .into_iter()
             .find(|chain| chain.name() == value)
-            .ok_or_else(|| "supported chains are ethereum and arbitrum".into())
+            .ok_or_else(|| {
+                format!(
+                    "supported chains are {}",
+                    Self::ALL.map(Self::name).join(", ")
+                )
+            })
     }
     pub fn name(self) -> &'static str {
         match self {
             Self::Ethereum => "ethereum",
             Self::Arbitrum => "arbitrum",
+            Self::Base => "base",
+            Self::Bsc => "bsc",
+            Self::Hyperliquid => "hyperliquid",
+            Self::Optimism => "optimism",
+            Self::Robinhood => "robinhood",
+            Self::Monad => "monad",
+            Self::Sonic => "sonic",
+            Self::Mantle => "mantle",
+            Self::Berachain => "berachain",
+            Self::Xlayer => "xlayer",
+            Self::Plasma => "plasma",
         }
     }
     pub fn id(self) -> u64 {
         match self {
             Self::Ethereum => 1,
             Self::Arbitrum => 42161,
+            Self::Base => 8453,
+            Self::Bsc => 56,
+            Self::Hyperliquid => 999,
+            Self::Optimism => 10,
+            Self::Robinhood => 4663,
+            Self::Monad => 143,
+            Self::Sonic => 146,
+            Self::Mantle => 5000,
+            Self::Berachain => 80094,
+            Self::Xlayer => 196,
+            Self::Plasma => 9745,
         }
     }
 }

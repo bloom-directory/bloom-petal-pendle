@@ -2,18 +2,78 @@
 
 An account-scoped Pendle V2 Petal for Bloom. This developer release supports
 market discovery, portfolio reads, PT buys, PT sells and post-maturity PT
-redemption on Ethereum and Arbitrum. It uses Pendle's V3 Convert API for
-unsigned transactions and the public HTTP API for discovery and portfolios.
+redemption on the 13 chains where Pendle has deployed its router and a market
+factory. It uses Pendle's V3 Convert API for unsigned transactions and the
+public HTTP API for discovery and portfolios.
 
 SDK and builder: Petal commit `7dd2722db5de305dd63ca4ed03591f3ab82fa40b`, where
 PR [#45](https://github.com/bloom-directory/petal/pull/45) merged into `master`.
 The `bloom-petal-development` skill from that commit is in
 `.agents/skills/bloom-petal-development/SKILL.md`.
 
+## Chains
+
+`<chain>` in the paths below is Bloom's name for the chain. The chain id is
+pinned in the Petal, and Bloom's RPC for that chain must report it before any
+market is trusted. Market factories are pinned from Pendle's
+`deployments/<chain id>-core.json`; chains Pendle reached later have only its
+later factory versions.
+
+| `<chain>` | Chain | Chain id | Pinned market factories | In Bloom's default config |
+| --- | --- | --- | --- | --- |
+| `ethereum` | Ethereum | 1 | `marketFactory`, V3–V6 | yes |
+| `arbitrum` | Arbitrum One | 42161 | `marketFactory`, V3–V6 | yes |
+| `base` | Base | 8453 | V5, V6 | yes |
+| `bsc` | BNB Chain | 56 | `marketFactory`, V3–V6 | yes |
+| `hyperliquid` | HyperEVM | 999 | V5, V6 | yes |
+| `optimism` | OP Mainnet | 10 | `marketFactory`, V3–V6 | yes |
+| `robinhood` | Robinhood Chain | 4663 | V6 | yes |
+| `monad` | Monad | 143 | V6 | no |
+| `sonic` | Sonic | 146 | V5, V6 | no |
+| `mantle` | Mantle | 5000 | V3–V6 | no |
+| `berachain` | Berachain | 80094 | V5, V6 | no |
+| `xlayer` | X Layer | 196 | V6 | no |
+| `plasma` | Plasma | 9745 | V5, V6 | no |
+
+Pendle had no active markets on Optimism, Sonic, Mantle or Berachain on 23
+November 2026; matured PT there can still be redeemed. Pendle's docs also list
+Ink and Katana, but it has deployed no router or market factory on either,
+only cross-chain PT contracts, so the Petal does not support them.
+
+A chain that is not in Bloom's default config works once the operator adds it
+to `~/.bloom/config.toml` under the name above and restarts Bloom. Until then,
+`markets.json`, `info.json` and `portfolio.json` still read Pendle's API, but
+drafts and confirms, which read the chain, fail with "Bloom needs a `<chain>`
+chain with chain_id <id> and a reachable RPC". For example:
+
+```toml
+[chains.monad]
+name = "monad"
+chain_id = 143
+rpc_urls = ["https://rpc.monad.xyz"]
+display_name = "Monad"
+native_symbol = "MON"
+native_decimals = 18
+```
+
+| `<chain>` | Native symbol | Public RPC | OP Stack |
+| --- | --- | --- | --- |
+| `monad` | MON | `https://rpc.monad.xyz` | no |
+| `sonic` | S | `https://rpc.soniclabs.com` | no |
+| `mantle` | MNT | `https://rpc.mantle.xyz` | yes: add `op_stack = true` |
+| `berachain` | BERA | `https://rpc.berachain.com` | no |
+| `xlayer` | OKB | `https://rpc.xlayer.tech` | yes: add `op_stack = true` |
+| `plasma` | XPL | `https://rpc.plasma.to` | no |
+
+Each RPC above reported its chain id on 23 November 2026. Mantle and X Layer
+blocks carry OP Stack deposit transactions. Berachain blocks carry a type
+`0x7e` system transaction that is not an OP Stack deposit. Choose RPCs you
+trust; Bloom's transaction handling on these six chains has not been tested
+end to end.
+
 ## Routes
 
-All paths below are relative to `/petals/pendle/`. `<chain>` is `ethereum` or
-`arbitrum`, Bloom's names for chains 1 and 42161:
+All paths below are relative to `/petals/pendle/`:
 
 | Path | Behavior |
 | --- | --- |
@@ -30,7 +90,7 @@ Operations are `buy-pt`, `sell-pt` and `redeem-pt`. Choose the chain and the
 wallet/account through the path. The receiver is always that account; body
 overrides are refused. IDs contain 1–64 ASCII letters, digits, hyphens or
 underscores. Each chain keeps its own operations, so the same id can be used on
-both chains and an operation is never visible from the other chain's paths.
+several chains and an operation is never visible from another chain's paths.
 
 `markets.json` returns `{chain, chainId, total, count, truncated, results}`.
 Each result has the market `address`, `name`, `expiry`, the `pt`, `yt`, `sy`,
@@ -72,7 +132,7 @@ pagination, `GET /core/v1/<chain id>/markets/<market>`, and
 `GET /core/v1/dashboard/positions/database/<account-address>`. The positions
 endpoint covers every chain; the Petal keeps only the selected chain's entries.
 Quotes come from `POST /core/v3/sdk/<chain id>/convert`. `petal.toml` allows
-these paths for chain ids 1 and 42161 only. Portfolio data is indexed and may
+these paths for the 13 chain ids above only. Portfolio data is indexed and may
 lag chain state; claimable rewards can be cached for up to 24 hours. It is not
 execution proof.
 
@@ -100,7 +160,7 @@ input.
 
 The wallet's policy must allow each transaction's target on that chain: the
 Pendle router, the input token for a buy's approval, and the PT for a sell's
-or redemption's approval. Destinations are per chain, so Ethereum needs its
+or redemption's approval. Destinations are per chain, so each chain needs its
 own entries.
 
 The plan contains exact-amount token approval steps only when allowance is
@@ -311,7 +371,7 @@ its hash while testing it.
 ## Deliberately outside this release
 
 YT/LP execution, limit-order signing, Boros, external aggregators, native ETH
-inputs, chains other than Ethereum and Arbitrum, cross-chain execution, sPENDLE
+inputs, Ink and Katana, cross-chain execution, sPENDLE
 and automated strategies. No API key is required for the
 tested public endpoints. Handle upstream failures by retaining the intent;
 do not bypass Bloom or widen approval limits to recover.

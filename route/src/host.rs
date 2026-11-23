@@ -40,8 +40,16 @@ impl Host for BloomHost {
         }
     }
     fn chain(&mut self, chain: Chain, method: &str, params: &str) -> Result<String> {
-        petal::sdk::chain_read(chain.name(), method, params)
-            .map_err(|_| format!("{} chain read failed", chain.name()))
+        // Bloom's default config lacks some of these chains; the operator adds
+        // them under the same name.
+        petal::sdk::chain_read(chain.name(), method, params).map_err(|_| {
+            format!(
+                "{} chain read failed; Bloom needs a `{}` chain with chain_id {} and a reachable RPC",
+                chain.name(),
+                chain.name(),
+                chain.id()
+            )
+        })
     }
     fn get(&mut self, key: &str) -> Result<Option<Vec<u8>>> {
         match petal::sdk::store_get(key, 128 * 1024) {
