@@ -68,8 +68,9 @@ native_decimals = 18
 Each RPC above reported its chain id on 23 November 2026. Mantle and X Layer
 blocks carry OP Stack deposit transactions. Berachain blocks carry a type
 `0x7e` system transaction that is not an OP Stack deposit. Choose RPCs you
-trust; Bloom's transaction handling on these six chains has not been tested
-end to end.
+trust. On 24 November 2026 a triad with these six entries, pointed at local
+forks, staged, signed and mined Pendle transactions on each of them; see
+acceptance below. Nothing has been broadcast to these chains' public networks.
 
 ## Routes
 
@@ -358,11 +359,21 @@ Operations are stored under `operations/<chain>/<operation>/<id>.json`
 them without the chain and cannot be read by this one. Finish or reconcile any
 operation in flight with the build that created it before upgrading.
 
-`scripts/triad-acceptance.py --chain <ethereum|arbitrum>` runs against an
-isolated local fork of that chain, with disposable Signer-created custody and
-software owner ceremonies. Ethereum buys PT-reUSD with reUSD, sells half
-back, then redeems PT-srUSDe, which matured on 22 October 2026, for srUSDe;
-Arbitrum buys PT-sUSDai with SY-sUSDai and sells half back. The public chains are read only.
+`scripts/triad-acceptance.py --chain <chain>` runs against an isolated local
+fork of that chain, with disposable Signer-created custody and software owner
+ceremonies. Ethereum buys PT-reUSD with reUSD, sells half back, then redeems
+PT-srUSDe, which matured on 22 October 2026, for srUSDe. Arbitrum, Base, BNB
+Chain, HyperEVM, Robinhood Chain, Monad, X Layer and Plasma buy PT with the
+market's SY and sell half back. Optimism, Sonic, Mantle and Berachain have no
+active market, so they redeem a matured PT for its SY. The public chains are
+read only.
+
+Each run creates a wallet, and the Broker allows four anonymous registrations
+per five minutes, so start runs at least 80 seconds apart. A fork pins the
+block it started at; Robinhood Chain's public RPC stops serving that block's
+state within the hour, so start its fork just before its run. Base's
+tokenized-stock SYs, such as GOOGLc's, price through a Base precompile that
+Anvil cannot run, so Base trades PT-yUTY.
 Local fork storage mutations supply fixture balances; no real assets are spent.
 Runtime state contains disposable custody data and stays outside this package.
 Acceptance evidence must also be written outside the package to avoid changing
