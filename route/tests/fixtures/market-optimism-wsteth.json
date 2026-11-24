@@ -1,0 +1,44 @@
+{
+  "chainId": 10,
+  "address": "0x24fb77c8c776c75f869bc65e6856af56f57d919f",
+  "expiry": "2024-09-26T00:00:00.000Z",
+  "pt": {
+    "address": "0xf4225f061e5e01aa59de5e615729a9180301eb07",
+    "symbol": "PT-wstETH-26SEP2024",
+    "decimals": 18
+  },
+  "yt": {
+    "address": "0x1dfe41cc7f7860ba7f1076ca6d0fedd707c87a00",
+    "symbol": "YT-wstETH-26SEP2024",
+    "decimals": 18
+  },
+  "sy": {
+    "address": "0x96a528f4414ac3ccd21342996c93f2ecdec24286",
+    "symbol": "SY-wstETH",
+    "decimals": 18
+  },
+  "accountingAsset": {
+    "address": "0xae7ab96520de3a18e5e111b5eaab095312d7fe84",
+    "symbol": "stETH",
+    "decimals": 18
+  },
+  "underlyingAsset": {
+    "address": "0x1f32b1c2345538c0c6f582fcb022739c4a194ebb",
+    "symbol": "wstETH",
+    "decimals": 18
+  },
+  "inputTokens": [
+    {
+      "address": "0x1f32b1c2345538c0c6f582fcb022739c4a194ebb",
+      "symbol": "wstETH",
+      "decimals": 18
+    }
+  ],
+  "outputTokens": [
+    {
+      "address": "0x1f32b1c2345538c0c6f582fcb022739c4a194ebb",
+      "symbol": "wstETH",
+      "decimals": 18
+    }
+  ]
+}

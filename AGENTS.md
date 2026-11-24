@@ -1,6 +1,7 @@
 # pendle operating contract
 
-Pendle V2 on Ethereum and Arbitrum. SDK and tooling are pinned to Petal commit
+Pendle V2 on every chain in `Chain::ALL`: the 13 chains where Pendle has
+deployed its router and a market factory. SDK and tooling are pinned to Petal commit
 `7dd2722db5de305dd63ca4ed03591f3ab82fa40b`, where PR #45 merged into `master`.
 Move every copy of the pin together: `route/Cargo.toml` (then
 `cargo update --manifest-path route/Cargo.toml -p bloom-petal-sdk`),
@@ -20,14 +21,20 @@ Bloom lists the accounts itself. Every chain read, stage, confirm, inspect,
 Pendle URL and store key takes that `Chain`.
 `Chain::id()` is the trust anchor: a live `eth_chainId` read only confirms it.
 To add a chain:
-- add a `Chain` variant with Bloom's chain name and its id;
-- pin its factories in `evm::factories` from `marketFactory` and
-  `marketFactoryV3` onwards in Pendle's `deployments/<chain id>-core.json`, and
-  check the router address there;
+- add a `Chain` variant with Bloom's chain name and its id, to `Chain::ALL`
+  too. Use Bloom's name where Bloom ships the chain; otherwise pick the name
+  an operator adds to `config.toml`;
+- pin its factories in `evm::factories`: whichever of `marketFactory` and
+  `marketFactoryV3` onwards Pendle's `deployments/<chain id>-core.json` has, in
+  that order, and check the router address there. A chain with no router or
+  market factory (Ink and Katana today) has nothing to trade;
 - allow its `/core/v1/<id>/markets/*` and `/core/v3/sdk/<id>/convert` paths in
-  `petal.toml`;
-- record a market and quote fixture from the public API, and add an entry to
-  `CHAINS` in `scripts/triad-acceptance.py`.
+  `petal.toml`, and name it in the consent summary;
+- record a market and quote fixture from the public API, add it to `recorded`
+  in `route/tests/operations.rs`, and pin the chain's id and factories in the
+  tests;
+- add it to the README's Chains table, with its config entry if Bloom does not
+  ship it, and add an entry to `CHAINS` in `scripts/triad-acceptance.py`.
 
 Decode actual calldata, enforce exact inputs and minimum outputs, and refuse
 unknown selectors, aggregator callbacks, embedded limit orders and native-token

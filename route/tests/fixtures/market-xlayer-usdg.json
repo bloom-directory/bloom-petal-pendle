@@ -1,0 +1,44 @@
+{
+  "chainId": 196,
+  "address": "0xb70be417526707c8ebf5f1a79e4876557639b01d",
+  "expiry": "2027-02-25T00:00:00.000Z",
+  "pt": {
+    "address": "0x5ea1f184af5ced57725213d8267b5c4c834557d4",
+    "symbol": "PT-USDG-25FEB2027",
+    "decimals": 6
+  },
+  "yt": {
+    "address": "0x5b4308e22ab59aae80cbf37089c528a125d2a34d",
+    "symbol": "YT-USDG-25FEB2027",
+    "decimals": 6
+  },
+  "sy": {
+    "address": "0x1f336f899f77b084133bc14a81170837ed618d1b",
+    "symbol": "SY-USDG",
+    "decimals": 6
+  },
+  "accountingAsset": {
+    "address": "0x4ae46a509f6b1d9056937ba4500cb143933d2dc8",
+    "symbol": "USDG",
+    "decimals": 6
+  },
+  "underlyingAsset": {
+    "address": "0x4ae46a509f6b1d9056937ba4500cb143933d2dc8",
+    "symbol": "USDG",
+    "decimals": 6
+  },
+  "inputTokens": [
+    {
+      "address": "0x4ae46a509f6b1d9056937ba4500cb143933d2dc8",
+      "symbol": "USDG",
+      "decimals": 6
+    }
+  ],
+  "outputTokens": [
+    {
+      "address": "0x4ae46a509f6b1d9056937ba4500cb143933d2dc8",
+      "symbol": "USDG",
+      "decimals": 6
+    }
+  ]
+}

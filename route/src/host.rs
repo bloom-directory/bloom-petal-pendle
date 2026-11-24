@@ -40,8 +40,21 @@ impl Host for BloomHost {
         }
     }
     fn chain(&mut self, chain: Chain, method: &str, params: &str) -> Result<String> {
-        petal::sdk::chain_read(chain.name(), method, params)
-            .map_err(|_| format!("{} chain read failed", chain.name()))
+        petal::sdk::chain_read(chain.name(), method, params).map_err(|error| match error {
+            // Bloom reports a chain missing from its config as "not found";
+            // its default config lacks some of these chains, and the operator
+            // adds them under the same name. The SDK classifies by message
+            // text, so an RPC error that says "not found" lands here too,
+            // hence the conditional advice. Reverts and other RPC failures get
+            // none.
+            petal::SdkError::Host(petal::HostStatus::NotFound) => format!(
+                "{} chain read failed: Bloom reported not found. If Bloom has no `{}` chain, add one with chain_id {} to its config.toml",
+                chain.name(),
+                chain.name(),
+                chain.id()
+            ),
+            _ => format!("{} chain read failed", chain.name()),
+        })
     }
     fn get(&mut self, key: &str) -> Result<Option<Vec<u8>>> {
         match petal::sdk::store_get(key, 128 * 1024) {

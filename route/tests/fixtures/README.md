@@ -24,6 +24,25 @@ material is included.
   Pendle's factory, but Pendle has not curated it, so the list is empty. It is
   a "USDai" market on another SY than the curated USDai market's.
 
+One market and one quote for each other chain, recorded on 2026-11-23 with
+`enableAggregator` and `useLimitOrder` off and 0.1% slippage. Where Pendle had
+active markets, the most liquid one, buying PT with 1 SY:
+
+- `market-base-googlc.json`, `quote-base-googlc.json`: Base, PT-GOOGLc (December 2026).
+- `market-bsc-clisbnb.json`, `quote-bsc-clisbnb.json`: BNB Chain, PT-clisBNB (April 2027).
+- `market-hyperliquid-khype.json`, `quote-hyperliquid-khype.json`: HyperEVM, PT-kHYPE (March 2027).
+- `market-robinhood-pfe.json`, `quote-robinhood-pfe.json`: Robinhood Chain, PT-PFE (December 2026).
+- `market-monad-susde.json`, `quote-monad-susde.json`: Monad, PT-sUSDE (January 2027).
+- `market-xlayer-usdg.json`, `quote-xlayer-usdg.json`: X Layer, PT-USDG (February 2027, 6 decimals).
+- `market-plasma-susde.json`, `quote-plasma-susde.json`: Plasma, PT-sUSDE (January 2027).
+
+Where Pendle had none, the most recently matured market, redeeming 1 PT to SY:
+
+- `market-optimism-wsteth.json`, `quote-optimism-wsteth-redeem.json`: OP Mainnet, PT-wstETH (September 2024).
+- `market-sonic-x33.json`, `quote-sonic-x33-redeem.json`: Sonic, PT-x33 (February 2026).
+- `market-mantle-cmeth.json`, `quote-mantle-cmeth-redeem.json`: Mantle, PT-cmETH (September 2025).
+- `market-berachain-ibgt.json`, `quote-berachain-ibgt-redeem.json`: Berachain, PT-iBGT (December 2025).
+
 The market fixtures keep only the fields `api::Market` reads. Quotes and
 curated-list answers are the full response.
 

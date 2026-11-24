@@ -19,12 +19,17 @@ import urllib.error
 
 ROUTER = "0x888888888889758f76e7103c6cbf23abbf58f946"
 # An Arbitrum "USDai" market from Pendle's factory that Pendle has not curated.
-# It is not a market on Ethereum, so both chains' curated lists leave it out.
+# It is not a market on any other chain, so every chain's curated list leaves it
+# out; on 24 November 2026 all 13 chains' lists returned nothing for it.
 UNCURATED = "0x3e510adb77ddb7a5c079c60e94711a20208bd588"
 ROOT = Path(__file__).resolve().parents[1]
 # One market per chain. `token` is what the test buys PT with and sells PT for;
 # `balance_slot` is that token's ERC-20 balance mapping slot, for `cast index`.
-# `buy_floor` is in PT base units for a 1e18 input.
+# `amount` is the buy input in token base units (default 1e18), and
+# `buy_floor` is the least PT, in base units, that input must buy. A chain with
+# no active Pendle market has only `redeem`: a matured PT redeemed for its SY.
+# Every slot below was verified on a fork by writing a balance and reading it
+# back through balanceOf.
 CHAINS = {
     "arbitrum": {
         "chain_id": 42161,
@@ -55,6 +60,113 @@ CHAINS = {
             "pt_balance_slot": "0",
         },
     },
+    # The chains below buy PT with the market's own SY and sell it back, or,
+    # where Pendle has no active market, redeem a matured PT for its SY.
+    "base": {
+        "chain_id": 8453,
+        # PT-yUTY, expiring 17 Dec 2026. Base's tokenized-stock SYs, such as
+        # GOOGLc's, price through a Base precompile that Anvil cannot run.
+        "market": "0x858539e155d870ecbbd27f5fb9d9521aa39251f1",
+        "pt": "0x0112e4d09bc228534eef9d52d5a06d6b94244e8e",
+        "token": "0x797f9d67a878250e0aa572c41a8a4e862ad09d5c",
+        "balance_slot": "2",
+        "buy_floor": 10**18,
+    },
+    "bsc": {
+        "chain_id": 56,
+        # PT-clisBNB, expiring 15 Apr 2027.
+        "market": "0x3974b474f33e00fe177b54206726a8d33fc87a57",
+        "pt": "0x7dfbebc2bcbc3e754d64c12f0fbb64f59d9e96e0",
+        "token": "0x27faf900007b4cba7803000251ec96bc69ff1bea",
+        "balance_slot": "2",
+        "buy_floor": 10**18,
+    },
+    "hyperliquid": {
+        "chain_id": 999,
+        # PT-kHYPE, expiring 25 Mar 2027.
+        "market": "0x697dd29eed8e926205a08400a60d1578154c1a60",
+        "pt": "0x9ccac9566fba516a5df00a23e81801b1f1cb57a8",
+        "token": "0x57fc55dff8ceca86ee94a6bf255af2f0ed90eb9e",
+        "balance_slot": "2",
+        "buy_floor": 10**18,
+    },
+    "optimism": {
+        "chain_id": 10,
+        "redeem": {
+            # PT-wstETH, matured 26 Sep 2024, redeemed for SY-wstETH.
+            "market": "0x24fb77c8c776c75f869bc65e6856af56f57d919f",
+            "pt": "0xf4225f061e5e01aa59de5e615729a9180301eb07",
+            "token": "0x96a528f4414ac3ccd21342996c93f2ecdec24286",
+            "pt_balance_slot": "0",
+        },
+    },
+    "robinhood": {
+        "chain_id": 4663,
+        # PT-PFE, expiring 10 Dec 2026, trades close to 1:1 with its SY.
+        "market": "0x892defbf510d9baa96dbd2a51b13e879a857a79b",
+        "pt": "0xf9cd484f7e7799ae32b7f9a75e60c478fd1f0b6e",
+        "token": "0x8c7454d4d64abd04fbf5f5ffe0dbcd5e3abcecf6",
+        "balance_slot": "2",
+        "buy_floor": 99 * 10**16,
+    },
+    "monad": {
+        "chain_id": 143,
+        # PT-sUSDE, expiring 28 Jan 2027.
+        "market": "0x9bf15c1824a4158d6f9c4ba8a19819e700f5e88b",
+        "pt": "0x39148079bca3abf3f3b40f6f1c1b1ae1f2927d13",
+        "token": "0xd1279361528c3c4588506e1746f81175dfa5f64e",
+        "balance_slot": "0",
+        "buy_floor": 10**18,
+    },
+    "sonic": {
+        "chain_id": 146,
+        "redeem": {
+            # PT-x33, matured 26 Feb 2026, redeemed for SY-x33.
+            "market": "0xc9646f2a8a1d2f12a7fbf0274ec2d3ecc65f1468",
+            "pt": "0x22fe64c10f482004c48872c98d1f03cbdcaddce9",
+            "token": "0x69a23f16974024a1b6a5362ac2a11bfeeefd5827",
+            "pt_balance_slot": "0",
+        },
+    },
+    "mantle": {
+        "chain_id": 5000,
+        "redeem": {
+            # PT-cmETH, matured 18 Sep 2025, redeemed for SY-cmETH.
+            "market": "0x6304ccbda63a7fb94919c705de54f9889f3ce047",
+            "pt": "0x698eb002a4ec013a33286f7f2ba0be3970e66455",
+            "token": "0x2ab88ac7458faec2e952bb79cc1be6577bf63e70",
+            "pt_balance_slot": "0",
+        },
+    },
+    "berachain": {
+        "chain_id": 80094,
+        "redeem": {
+            # PT-iBGT, matured 25 Dec 2025, redeemed for SY-iBGT.
+            "market": "0x850a9f099de3081fe88f8be6207492c52754acb5",
+            "pt": "0xc2c7ded5837f911b7efe5984b52182036fd66a20",
+            "token": "0xc61c866b6fdc36f88ec368b969c6d7cb810cafa9",
+            "pt_balance_slot": "0",
+        },
+    },
+    "xlayer": {
+        "chain_id": 196,
+        # PT-USDG, expiring 25 Feb 2027. USDG and its SY and PT have 6 decimals.
+        "market": "0xb70be417526707c8ebf5f1a79e4876557639b01d",
+        "pt": "0x5ea1f184af5ced57725213d8267b5c4c834557d4",
+        "token": "0x1f336f899f77b084133bc14a81170837ed618d1b",
+        "balance_slot": "0",
+        "amount": 10**6,
+        "buy_floor": 10**6,
+    },
+    "plasma": {
+        "chain_id": 9745,
+        # PT-sUSDE, expiring 28 Jan 2027.
+        "market": "0xdb96b529d19ff4a7d711e6e082172c77cfe88ed8",
+        "pt": "0x257561233419039bec3a28be717d14b4f490883d",
+        "token": "0x9838b0450e311962aed969ba7d0fe0bb9d8620eb",
+        "balance_slot": "0",
+        "buy_floor": 10**18,
+    },
 }
 
 
@@ -68,7 +180,10 @@ def main():
     args = parser.parse_args()
     chain = args.chain
     config = CHAINS[chain]
-    MARKET, PT, TOKEN = config["market"], config["pt"], config["token"]
+    # Redeem-only chains have no market to buy on.
+    MARKET, PT, TOKEN = config.get("market"), config.get("pt"), config.get("token")
+    redeem = config.get("redeem")
+    amount = config.get("amount", 10**18)
     assert urllib.parse.urlparse(args.rpc).hostname in ("localhost", "127.0.0.1"), "local fork only"
     assert not args.report.resolve().is_relative_to(ROOT), "evidence must live outside the package"
     env = os.environ.copy()
@@ -157,9 +272,11 @@ def main():
     markets = json.loads(read(f"/petals/pendle/{chain}/markets.json"))
     assert markets["chainId"] == config["chain_id"] and not markets["truncated"]
     assert markets["count"] == markets["total"]
-    assert any(m["address"] == MARKET for m in markets["results"])
+    if MARKET:
+        assert any(m["address"] == MARKET for m in markets["results"])
     report["active_markets"] = markets["total"]
-    assert json.loads(read(f"/petals/pendle/{chain}/markets/{MARKET}/info.json"))["address"] == MARKET
+    shown = MARKET or redeem["market"]
+    assert json.loads(read(f"/petals/pendle/{chain}/markets/{shown}/info.json"))["address"] == shown
     refused = cli("vfs", "cat", f"/petals/pendle/{chain}/markets/{UNCURATED}/info.json", check=False)
     assert refused.returncode != 0, refused.stdout[-600:]
     assert "not on Pendle's curated list" in refused.stderr + refused.stdout, refused.stderr[-600:]
@@ -192,8 +309,7 @@ def main():
     policy["allowed_petal_packages"] = [report["package_hash"]]
     # The token approval goes to the input token for a buy and to PT for a sell
     # or a redemption.
-    redeem = config.get("redeem")
-    destinations = {TOKEN, PT, ROUTER} | ({redeem["pt"]} if redeem else set())
+    destinations = {ROUTER} | ({TOKEN, PT} if MARKET else set()) | ({redeem["pt"]} if redeem else set())
     policy["allowed_destinations"] = [{"chain": chain, "destination": d} for d in sorted(destinations)]
     policy_file = work / (wallet + "-policy.json")
     policy_file.write_text(json.dumps(policy))
@@ -202,13 +318,14 @@ def main():
     cli("wallet", "commit-policy", launch_field(launch, "operation_id"))
     passed("package and exact destinations authorized by owner policy ceremony")
     rpc("anvil_setBalance", [owner, hex(10**20)])
-    # Fork-only test balance, written to the token's balance mapping. Assert the
-    # effect before using it. No changes are sent to the public chain.
-    index = command(["cast", "index", "address", owner, config["balance_slot"]]).stdout.strip()
-    assert balance(TOKEN, owner) == 0
-    rpc("anvil_setStorageAt", [TOKEN, index, "0x" + hex(10**19)[2:].rjust(64, "0")])
-    assert balance(TOKEN, owner) == 10**19
-    passed("disposable account funded only on local fork")
+    if MARKET:
+        # Fork-only test balance, written to the token's balance mapping. Assert
+        # the effect before using it. No changes are sent to the public chain.
+        index = command(["cast", "index", "address", owner, config["balance_slot"]]).stdout.strip()
+        assert balance(TOKEN, owner) == 0
+        rpc("anvil_setStorageAt", [TOKEN, index, "0x" + hex(10 * amount)[2:].rjust(64, "0")])
+        assert balance(TOKEN, owner) == 10 * amount
+        passed("disposable account funded only on local fork")
     portfolio = json.loads(read(f"/petals/pendle/{chain}/accounts/{wallet}/1/portfolio.json"))
     assert all(p["chainId"] == config["chain_id"] for p in portfolio["positions"])
     passed("selected-account live portfolio API")
@@ -255,19 +372,20 @@ def main():
             time.sleep(0.3)
         raise RuntimeError(op + " timed out")
 
-    pt_before = balance(PT, owner)
-    bought = execute("buy-pt", "accept-buy", 10**18, config["buy_floor"])
-    pt_delta = balance(PT, owner) - pt_before
-    assert pt_delta >= int(bought["encoded_minimum"])
-    assert balance(PT, owner_zero) == 0
-    report["pt_received"] = str(pt_delta)
-    passed("PT buy mined through Broker/Signer; account-one output meets encoded floor")
-    token_before = balance(TOKEN, owner)
-    sold = execute("sell-pt", "accept-sell", pt_delta // 2, 1)
-    token_delta = balance(TOKEN, owner) - token_before
-    assert token_delta >= int(sold["encoded_minimum"])
-    report["token_received_on_sell"] = str(token_delta)
-    passed("PT sell mined through Broker/Signer; output meets encoded floor")
+    if MARKET:
+        pt_before = balance(PT, owner)
+        bought = execute("buy-pt", "accept-buy", amount, config["buy_floor"])
+        pt_delta = balance(PT, owner) - pt_before
+        assert pt_delta >= int(bought["encoded_minimum"])
+        assert balance(PT, owner_zero) == 0
+        report["pt_received"] = str(pt_delta)
+        passed("PT buy mined through Broker/Signer; account-one output meets encoded floor")
+        token_before = balance(TOKEN, owner)
+        sold = execute("sell-pt", "accept-sell", pt_delta // 2, 1)
+        token_delta = balance(TOKEN, owner) - token_before
+        assert token_delta >= int(sold["encoded_minimum"])
+        report["token_received_on_sell"] = str(token_delta)
+        passed("PT sell mined through Broker/Signer; output meets encoded floor")
     if redeem:
         # Fork-only matured PT, written to its balance mapping like the token.
         index = command(["cast", "index", "address", owner, redeem["pt_balance_slot"]]).stdout.strip()
@@ -279,6 +397,9 @@ def main():
         output_delta = balance(redeem["token"], owner) - output_before
         assert balance(redeem["pt"], owner) == 0
         assert output_delta >= int(redeemed["encoded_minimum"])
+        # The redemption pays account one, not account zero; on the
+        # redeem-only chains this is the only such check.
+        assert balance(redeem["token"], owner_zero) == 0
         report["redeem_output"] = str(output_delta)
         passed("matured PT redeemed through Broker/Signer; output meets encoded floor")
     report["software_owner_ceremonies"] = count

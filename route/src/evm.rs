@@ -75,23 +75,68 @@ pub fn chain_id<H: Host>(host: &mut H, chain: Chain) -> Result<u64> {
     )
     .map_err(|_| "invalid eth_chainId hex".into())
 }
-/// Pendle's market factories (`marketFactory` and `marketFactoryV3` to `V6`),
-/// pinned from `deployments/<chain id>-core.json` in pendle-core-v2-public.
-pub fn factories(chain: Chain) -> [&'static str; 5] {
+/// Pendle's market factories, pinned from `deployments/<chain id>-core.json`
+/// in pendle-core-v2-public: `marketFactory` and `marketFactoryV3` to `V6`,
+/// whichever that chain has. Chains Pendle reached later have only the later
+/// versions.
+pub fn factories(chain: Chain) -> &'static [&'static str] {
     match chain {
-        Chain::Ethereum => [
+        Chain::Ethereum => &[
             "0x27b1dacd74688af24a64bd3c9c1b143118740784",
             "0x1a6fcc85557bc4fb7b534ed835a03ef056552d52",
             "0x3d75bd20c983edb5fd218a1b7e0024f1056c7a2f",
             "0x6fcf753f2c67b83f7b09746bbc4fa0047b35d050",
             "0x6d247b1c044fa1e22e6b04fa9f71baf99eb29a9f",
         ],
-        Chain::Arbitrum => [
+        Chain::Arbitrum => &[
             "0xf5a7de2d276dbda3eef1b62a9e718eff4d29ddc8",
             "0x2fcb47b58350cd377f94d3821e7373df60bd9ced",
             "0xd9f5e9589016da862d2abce980a5a5b99a94f3e8",
             "0xd29e76c6f15ada0150d10a1d3f45accd2098283b",
             "0x49f2f7002669e0e4425fa0203975625ab4af3143",
+        ],
+        Chain::Base => &[
+            "0x59968008a703dc13e6beaeced644bdce4ee45d13",
+            "0x81e80a50e56d10c501ff17b5fe2f662bd9ea4590",
+        ],
+        Chain::Bsc => &[
+            "0x2bea6bfd8fbff45aa2a893eb3b6d85d10efcc70e",
+            "0xc40febf5a33b8c92b187d9be0fd3fe0ac2e4b07c",
+            "0x7d20e644d2a9e149e5be9be9ad2ab243a7835d37",
+            "0x7c7f73f7a320364dbb3c9aaa9bccd402040ee0f9",
+            "0x80ce46449df1c977f6ba60495125ce282f83ddfb",
+        ],
+        Chain::Hyperliquid => &[
+            "0x44a2ddf5339ffde8c23af4099a64def59b11b128",
+            "0xb5cd902cbef8461b8d6fa852f93784f090fd7beb",
+        ],
+        Chain::Optimism => &[
+            "0x17f100fb4be2707675c6439468d38249dd993d58",
+            "0x4a2b38b9cbd83c86f261a4d64c243795d4d44abc",
+            "0x73be47237f12f36203823bac9a4d80dc798b7015",
+            "0x02adf72d5d06a9c92136562eb237c07696833a84",
+            "0x95a937f7064c75c6bc257160088c0a9d58cca333",
+        ],
+        Chain::Robinhood => &["0x544bf81c855ae84c1e8b65d5e38770898d01eee2"],
+        Chain::Monad => &["0xa3cb62a49b66eb2536cf6f3c7ac82293784888a3"],
+        Chain::Sonic => &[
+            "0xfee31a6ec6ebefa0b5a594bf5b1139e3c6faa0fb",
+            "0x0ab3ae25c42a2f3748a018556989355d568fa6d6",
+        ],
+        Chain::Mantle => &[
+            "0xd228ec1f7d4313fe321fab511a872475d07f5ba6",
+            "0xca274a44a52241c1a8efb9f84bf492d8363929fc",
+            "0xcb02435716b0143d4ac1bdf370302d619e714126",
+            "0xa35ae21a593cb06959978e20b33db34163166c79",
+        ],
+        Chain::Berachain => &[
+            "0x8a09574b0401a856d89d1b583ee22e8cb0c5530b",
+            "0x6131ca76529250679cf9e2a3b07b135f20aab01a",
+        ],
+        Chain::Xlayer => &["0x544bf81c855ae84c1e8b65d5e38770898d01eee2"],
+        Chain::Plasma => &[
+            "0x28de02ac3c3f5ef427e55c321f73fdc7f192e8e4",
+            "0x84a240fa784e7f03cb99ba3716065961c5d0d531",
         ],
     }
 }

@@ -1,0 +1,59 @@
+{
+  "action": "redeem-py",
+  "inputs": [
+    {
+      "token": "0x698eb002a4ec013a33286f7f2ba0be3970e66455",
+      "amount": "1000000000000000000"
+    }
+  ],
+  "requiredApprovals": [
+    {
+      "token": "0xaffe4b1b1eebe6dd1ee31ad27c88a918825c89f8",
+      "amount": "1000000000000000000"
+    },
+    {
+      "token": "0x698eb002a4ec013a33286f7f2ba0be3970e66455",
+      "amount": "1000000000000000000"
+    }
+  ],
+  "routes": [
+    {
+      "contractParamInfo": {
+        "method": "redeemPyToSy",
+        "contractCallParamsName": [
+          "receiver",
+          "YT",
+          "netPyIn",
+          "minSyOut"
+        ],
+        "contractCallParams": [
+          "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+          "0xaffe4b1b1eebe6dd1ee31ad27c88a918825c89f8",
+          "1000000000000000000",
+          "905458388671811004"
+        ]
+      },
+      "tx": {
+        "data": "0x339748cb0000000000000000000000007e5f4552091a69125d5dfcb7b8c2659029395bdf000000000000000000000000affe4b1b1eebe6dd1ee31ad27c88a918825c89f80000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000c90d59b6fae4dbc",
+        "to": "0x888888888889758F76e7103c6CbF23ABbF58F946",
+        "from": "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"
+      },
+      "outputs": [
+        {
+          "token": "0x2ab88ac7458faec2e952bb79cc1be6577bf63e70",
+          "amount": "906364753425236241"
+        }
+      ],
+      "data": {
+        "aggregatorType": "VOID",
+        "priceImpact": 0,
+        "priceImpactBreakDown": {
+          "internalPriceImpact": 0,
+          "externalPriceImpact": 0
+        },
+        "gasUsed": "164553"
+      }
+    }
+  ],
+  "computingUnit": 0
+}
