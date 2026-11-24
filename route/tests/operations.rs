@@ -70,19 +70,27 @@ fn eth_tx() -> Transaction {
 /// active markets it buys PT with 1 SY of the most liquid one; elsewhere it
 /// redeems 1 PT of the latest matured market to SY. Ethereum and Arbitrum
 /// reuse their original fixtures.
+///
+/// `factory` is the factory that created the market, found on 24 November
+/// 2026 by asking every market factory in Pendle's `deployments/<chain
+/// id>-core.json` for that chain: `isValidMarket` was true for this one only.
+/// It is recorded independently of `evm::factories`, so a wrong or missing pin
+/// fails the test that uses it.
 struct Recorded {
     market: Market,
     quote: Value,
     op: Operation,
+    factory: &'static str,
 }
 fn recorded(chain: Chain) -> Recorded {
     let redeem = Operation::RedeemPt;
-    let (market, quote, op) = match chain {
+    let (market, quote, op, factory) = match chain {
         Chain::Ethereum => {
             return Recorded {
                 market: eth_market(),
                 quote: eth_quote(),
                 op: BUY,
+                factory: "0x6d247b1c044fa1e22e6b04fa9f71baf99eb29a9f",
             };
         }
         Chain::Arbitrum => {
@@ -90,68 +98,81 @@ fn recorded(chain: Chain) -> Recorded {
                 market: market(),
                 quote: quote(),
                 op: BUY,
+                factory: "0x49f2f7002669e0e4425fa0203975625ab4af3143",
             };
         }
         Chain::Base => (
             include_str!("fixtures/market-base-googlc.json"),
             include_str!("fixtures/quote-base-googlc.json"),
             BUY,
+            "0x81e80a50e56d10c501ff17b5fe2f662bd9ea4590",
         ),
         Chain::Bsc => (
             include_str!("fixtures/market-bsc-clisbnb.json"),
             include_str!("fixtures/quote-bsc-clisbnb.json"),
             BUY,
+            "0x80ce46449df1c977f6ba60495125ce282f83ddfb",
         ),
         Chain::Hyperliquid => (
             include_str!("fixtures/market-hyperliquid-khype.json"),
             include_str!("fixtures/quote-hyperliquid-khype.json"),
             BUY,
+            "0xb5cd902cbef8461b8d6fa852f93784f090fd7beb",
         ),
         Chain::Optimism => (
             include_str!("fixtures/market-optimism-wsteth.json"),
             include_str!("fixtures/quote-optimism-wsteth-redeem.json"),
             redeem,
+            "0x17f100fb4be2707675c6439468d38249dd993d58",
         ),
         Chain::Robinhood => (
             include_str!("fixtures/market-robinhood-pfe.json"),
             include_str!("fixtures/quote-robinhood-pfe.json"),
             BUY,
+            "0x544bf81c855ae84c1e8b65d5e38770898d01eee2",
         ),
         Chain::Monad => (
             include_str!("fixtures/market-monad-susde.json"),
             include_str!("fixtures/quote-monad-susde.json"),
             BUY,
+            "0xa3cb62a49b66eb2536cf6f3c7ac82293784888a3",
         ),
         Chain::Sonic => (
             include_str!("fixtures/market-sonic-x33.json"),
             include_str!("fixtures/quote-sonic-x33-redeem.json"),
             redeem,
+            "0xfee31a6ec6ebefa0b5a594bf5b1139e3c6faa0fb",
         ),
         Chain::Mantle => (
             include_str!("fixtures/market-mantle-cmeth.json"),
             include_str!("fixtures/quote-mantle-cmeth-redeem.json"),
             redeem,
+            "0xcb02435716b0143d4ac1bdf370302d619e714126",
         ),
         Chain::Berachain => (
             include_str!("fixtures/market-berachain-ibgt.json"),
             include_str!("fixtures/quote-berachain-ibgt-redeem.json"),
             redeem,
+            "0x8a09574b0401a856d89d1b583ee22e8cb0c5530b",
         ),
         Chain::Xlayer => (
             include_str!("fixtures/market-xlayer-usdg.json"),
             include_str!("fixtures/quote-xlayer-usdg.json"),
             BUY,
+            "0x544bf81c855ae84c1e8b65d5e38770898d01eee2",
         ),
         Chain::Plasma => (
             include_str!("fixtures/market-plasma-susde.json"),
             include_str!("fixtures/quote-plasma-susde.json"),
             BUY,
+            "0x84a240fa784e7f03cb99ba3716065961c5d0d531",
         ),
     };
     Recorded {
         market: serde_json::from_str(market).unwrap(),
         quote: serde_json::from_str(quote).unwrap(),
         op,
+        factory,
     }
 }
 
@@ -165,6 +186,9 @@ struct Fake {
     chain_id: Option<u64>,
     expired: bool,
     factory: bool,
+    /// The only factory that recognizes the market; `None` lets every factory
+    /// answer `factory`.
+    market_factory: Option<Address>,
     allowance: U256,
     http_calls: usize,
     http_response: Option<HttpResponse>,
@@ -223,6 +247,7 @@ impl Default for Fake {
             chain_id: None,
             expired: false,
             factory: true,
+            market_factory: None,
             allowance: U256::ZERO,
             http_calls: 0,
             http_response: None,
@@ -372,9 +397,9 @@ impl Host for Fake {
         let bytes = hex::decode(&data[2..]).unwrap();
         let m = &self.market;
         let response = if bytes.starts_with(&isValidMarketCall::SELECTOR) {
-            self.factory_calls
-                .push(address(p[0]["to"].as_str().unwrap())?);
-            self.factory.abi_encode()
+            let factory = address(p[0]["to"].as_str().unwrap())?;
+            self.factory_calls.push(factory);
+            (self.factory && self.market_factory.is_none_or(|f| f == factory)).abi_encode()
         } else if bytes.starts_with(&readTokensCall::SELECTOR) {
             (
                 address(&m.sy.address)?,
@@ -1224,13 +1249,25 @@ fn ethereum_draft_uses_chain_one_end_to_end() {
     );
 }
 /// Each chain's recorded quote passes the same checks and settles through the
-/// same steps, and every request, read, stage and claim uses that chain.
+/// same steps, and every request, read, stage and claim uses that chain. Only
+/// the factory that created the recorded market recognizes it, so the draft
+/// succeeds only if that factory is among the chain's pins.
 #[test]
 fn every_chain_drafts_and_settles_its_recorded_quote() {
     for chain in Chain::ALL {
-        let Recorded { market, quote, op } = recorded(chain);
+        let Recorded {
+            market,
+            quote,
+            op,
+            factory,
+        } = recorded(chain);
         let id = chain.id();
         assert_eq!(market.chain_id, id, "{chain:?}");
+        let pinned = factories(chain);
+        let at = pinned
+            .iter()
+            .position(|f| *f == factory)
+            .unwrap_or_else(|| panic!("{chain:?}: {factory} created the market but is not pinned"));
         let route = &quote["routes"][0];
         // A buy pays with the quoted input; a redemption pays out the quoted output.
         let token = if op == BUY {
@@ -1250,6 +1287,7 @@ fn every_chain_drafts_and_settles_its_recorded_quote() {
             expired: op == Operation::RedeemPt,
             market: market.clone(),
             quote: quote.clone(),
+            market_factory: Some(address(factory).unwrap()),
             ..Fake::default()
         };
         let body = serde_json::to_vec(&request).unwrap();
@@ -1264,11 +1302,9 @@ fn every_chain_drafts_and_settles_its_recorded_quote() {
             ],
             "{chain:?}"
         );
-        assert_eq!(
-            h.factory_calls,
-            [address(factories(chain)[0]).unwrap()],
-            "{chain:?}"
-        );
+        // Pins are asked in order until the market's own factory answers.
+        let asked: Vec<_> = pinned[..=at].iter().map(|f| address(f).unwrap()).collect();
+        assert_eq!(h.factory_calls, asked, "{chain:?}");
         let d = workflow::load(&mut h, chain, &account(), op, "one").unwrap();
         assert_eq!(d.chain, chain);
         let plan = workflow::plan(&d);

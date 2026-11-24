@@ -14,8 +14,11 @@ The `bloom-petal-development` skill from that commit is in
 ## Chains
 
 `<chain>` in the paths below is Bloom's name for the chain. The chain id is
-pinned in the Petal, and Bloom's RPC for that chain must report it before any
-market is trusted. Market factories are pinned from Pendle's
+pinned in the Petal, and Bloom must report it for that chain before any market
+is trusted. Bloom asks its RPCs for the chain id once and keeps the answer, so
+later reads may reach a different RPC in the chain's list; Bloom still signs
+with the chain id in its config. List only RPCs you trust for that chain.
+Market factories are pinned from Pendle's
 `deployments/<chain id>-core.json`; chains Pendle reached later have only its
 later factory versions.
 
@@ -43,8 +46,9 @@ only cross-chain PT contracts, so the Petal does not support them.
 A chain that is not in Bloom's default config works once the operator adds it
 to `~/.bloom/config.toml` under the name above and restarts Bloom. Until then,
 `markets.json`, `info.json` and `portfolio.json` still read Pendle's API, but
-drafts and confirms, which read the chain, fail with "Bloom needs a `<chain>`
-chain with chain_id <id> and a reachable RPC". For example:
+drafts and confirms, which read the chain, fail with "`<chain>` chain read
+failed: Bloom reported not found. If Bloom has no `<chain>` chain, add one with
+chain_id <id> to its config.toml". For example:
 
 ```toml
 [chains.monad]
@@ -374,6 +378,14 @@ block it started at; Robinhood Chain's public RPC stops serving that block's
 state within the hour, so start its fork just before its run. Base's
 tokenized-stock SYs, such as GOOGLc's, price through a Base precompile that
 Anvil cannot run, so Base trades PT-yUTY.
+
+What a fork run does not show: only Ethereum pays with a token other than SY,
+so routes through an SY's input and output tokens are exercised on Ethereum
+alone. Anvil mines its own blocks with its own fee rules, so a run does not
+reproduce a chain's real fees, such as Monad charging the full gas limit or
+Mantle's fee model, or real OP Stack receipts. Sells and redemptions ask for a
+minimum output of 1, so their floor checks show only that the encoded minimum
+was met.
 Local fork storage mutations supply fixture balances; no real assets are spent.
 Runtime state contains disposable custody data and stays outside this package.
 Acceptance evidence must also be written outside the package to avoid changing

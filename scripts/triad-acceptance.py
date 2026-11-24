@@ -390,6 +390,9 @@ def main():
         output_delta = balance(redeem["token"], owner) - output_before
         assert balance(redeem["pt"], owner) == 0
         assert output_delta >= int(redeemed["encoded_minimum"])
+        # The redemption pays account one, not account zero; on the
+        # redeem-only chains this is the only such check.
+        assert balance(redeem["token"], owner_zero) == 0
         report["redeem_output"] = str(output_delta)
         passed("matured PT redeemed through Broker/Signer; output meets encoded floor")
     report["software_owner_ceremonies"] = count
