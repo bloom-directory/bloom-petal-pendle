@@ -51,6 +51,15 @@ Petal cannot read receipts to tell whether it landed. Never rely on the
 factory check alone, or on the market endpoint's 404 for an uncurated
 market, which Pendle does not document.
 
+The quote's five minutes are one clock for the whole operation, set when the
+draft is written and never extended by a confirm. After expiry nothing new is
+staged, and only a step whose transaction approval Bloom has already asked
+for, or that Bloom may already have sent, continues. Each step takes three
+confirm writes (stage, ask for the owner approval, send), and the second is
+what lets a step outlive the quote. Keep `plan.md`, the `draft.json` read
+bodies (`workflow::APPROVALS_GUIDE` and `DEADLINE_GUIDE`) and the README's
+"Steps, owner approvals and the deadline" telling agents the same thing.
+
 An accepted write, API quote or successful simulation is not execution proof.
 Unknown staging/submission outcomes require reconciliation. Never generate a
 new outbox entry to work around an ambiguous existing one.

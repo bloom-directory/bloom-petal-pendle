@@ -1356,9 +1356,43 @@ fn describe(market: &api::Market, token: &str, decimals: u8) -> String {
     format!("{token} ({symbol}, {decimals} decimals)")
 }
 
-pub fn plan(draft: &Draft) -> String {
+/// What a draft's read body tells an agent about owner approvals, before the
+/// draft exists. `plan.md` gives the exact count once it does.
+pub const APPROVALS_GUIDE: &str = "one owner approval per outbox step: 1 when the router may already spend the amount, 2 when it may spend none (an exact approval first), 3 when it may spend some but too little (a reset to zero, then the exact approval). After this write, plan.md lists the steps and the deadline: tell the owner how many approvals to expect, and by when, before the first";
+/// What a draft's read body tells an agent about the quote's five minutes.
+pub const DEADLINE_GUIDE: &str = "the quote expires five minutes after this write, and that one window covers every step. Each step takes three writes to confirm.json: the first stages it, the second asks Bloom to send it and gets the owner approval it needs, the third sends it after the ceremony. Write the second straight after the first: once Bloom has asked for a step's approval, the step can still be sent after expiry, but nothing new is staged then. A step is staged only after the one before it has mined. Settle any pending wallet-policy update before drafting: a step that has asked only for that update stops with the quote";
+
+/// `ms` since the Unix epoch as a UTC date and time, to the second.
+pub fn utc(ms: u64) -> String {
+    let secs = ms / 1000;
+    let (days, rest) = (secs / 86_400, secs % 86_400);
+    // Howard Hinnant's civil_from_days, for days since 1970-01-01.
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
     format!(
-        "# Pendle {}\n\nWallet/account: {}/{}\nChain: {} ({})\nOwner/receiver: {}\nMarket: {}\nMaturity: {}\nInput token: {}\nInput base units: {}\nOutput token: {}\nExpected output base units (API estimate): {}\nMinimum output enforced in calldata: {}\nPrice impact (API estimate): {}\nQuote expires at: {} ms\nAccounting asset: {} ({})\nUnderlying asset: {} ({})\n\nThe input and output tokens are checked onchain, and their decimals are read from them. Symbols, the maturity date and the accounting and underlying assets are as Pendle reports them.\n\n{} outbox steps; each requires its own Bloom authorization. Inspect status.json, then write `confirm` to confirm.json to advance one step. A successful receipt is execution evidence, not an independent APY or redemption-value guarantee. Router: {}.\n",
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC",
+        rest / 3_600,
+        rest % 3_600 / 60,
+        rest % 60
+    )
+}
+
+pub fn plan(draft: &Draft) -> String {
+    let expires = utc(draft.expires_ms);
+    let steps: Vec<&str> = draft.steps.iter().map(|step| step.kind.as_str()).collect();
+    let approvals = match steps.len() {
+        1 => "1 owner approval".to_owned(),
+        n => format!("{n} owner approvals, one per step"),
+    };
+    format!(
+        "# Pendle {}\n\nWallet/account: {}/{}\nChain: {} ({})\nOwner/receiver: {}\nMarket: {}\nMaturity: {}\nInput token: {}\nInput base units: {}\nOutput token: {}\nExpected output base units (API estimate): {}\nMinimum output enforced in calldata: {}\nPrice impact (API estimate): {}\nQuote expires at: {expires} ({} ms)\nAccounting asset: {} ({})\nUnderlying asset: {} ({})\n\nThe input and output tokens are checked onchain, and their decimals are read from them. Symbols, the maturity date and the accounting and underlying assets are as Pendle reports them.\n\nSteps: {}. Each is one Bloom outbox entry, so this operation needs {approvals}. Tell the owner how many to expect, and that the quote expires at {expires}, before the first.\n\nEach step takes three writes of `confirm` to confirm.json: the first stages it, the second asks Bloom to send it and gets the owner approval it needs, and the third sends it after the ceremony. Write the second straight after the first: once Bloom has asked for a step's approval, the step can still be sent after the quote expires, but nothing new is staged then. A step is staged only after the one before it has mined. So by {expires}, every step but the last must be approved and mined, and the last must be staged with its approval asked for. Inspect status.json between writes. A successful receipt is execution evidence, not an independent APY or redemption-value guarantee. Router: {}.\n",
         draft.operation.name(),
         draft.wallet,
         draft.account,
@@ -1378,7 +1412,7 @@ pub fn plan(draft: &Draft) -> String {
         plain(&draft.market.accounting_asset.address),
         plain(&draft.market.underlying_asset.symbol),
         plain(&draft.market.underlying_asset.address),
-        draft.steps.len(),
+        steps.join(", "),
         ROUTER
     )
 }

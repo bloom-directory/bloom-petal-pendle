@@ -1049,12 +1049,131 @@ fn native_token_drafts_are_refused() {
     assert_eq!(h.http_calls, 0);
     // The 0xEeee… placeholder for ETH is not one of the SY's tokens.
     r.token = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into();
-    assert_eq!(
-        draft(&mut h, &r).unwrap_err(),
-        "asset is not natively supported by this market's SY; aggregator routes are disabled"
+    assert!(
+        draft(&mut h, &r)
+            .unwrap_err()
+            .starts_with("asset is not natively supported by this market's SY; aggregator routes are disabled. The SY accepts only itself")
     );
     assert_eq!(h.http_calls, 2, "no quote is requested");
     assert!(h.store.is_empty());
+}
+/// A token the market's SY does not take is refused before any quote, and the
+/// refusal names what the SY accepts for a buy, or pays out for an exit: an
+/// exit cannot land in anything else.
+#[test]
+fn an_unsupported_token_names_what_the_sy_takes() {
+    let other = "0x00000000000000000000000000000000000c0ffe";
+    let m = market();
+    let r = redeem_market();
+    let listed = |tokens: &[api::Token]| -> String {
+        tokens
+            .iter()
+            .map(|t| format!(", {}", t.address.to_lowercase()))
+            .collect()
+    };
+    for (chain, op, market, quote, verb, tokens) in [
+        (
+            ARB,
+            BUY,
+            m.clone(),
+            quote(),
+            "accepts",
+            listed(&m.input_tokens),
+        ),
+        (
+            ARB,
+            Operation::SellPt,
+            m.clone(),
+            sell_quote(),
+            "pays out",
+            listed(&m.output_tokens),
+        ),
+        (
+            ETH,
+            Operation::RedeemPt,
+            r.clone(),
+            redeem_quote(),
+            "pays out",
+            listed(&r.output_tokens),
+        ),
+    ] {
+        let mut h = Fake {
+            expired: op == Operation::RedeemPt,
+            market: market.clone(),
+            quote: quote.clone(),
+            ..Fake::default()
+        };
+        let request = DraftInput {
+            market: market.address.clone(),
+            token: other.into(),
+            amount: quote["inputs"][0]["amount"].as_str().unwrap().into(),
+            min_output: "1".into(),
+            slippage_bps: 10,
+            max_price_impact_bps: 100,
+        };
+        let error = workflow::create(
+            &mut h,
+            chain,
+            &account(),
+            op,
+            "one",
+            &serde_json::to_vec(&request).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "asset is not natively supported by this market's SY; aggregator routes are disabled. The SY {verb} only itself ({}){tokens}",
+                market.sy.address.to_lowercase()
+            ),
+            "{op:?}"
+        );
+        assert!(!tokens.is_empty(), "{op:?}");
+        assert!(h.requests.iter().all(|r| r.method != "POST"), "{op:?}");
+        assert!(h.store.is_empty(), "{op:?}");
+    }
+}
+/// `plan.md` names the steps, says how many owner approvals they need, and
+/// gives the quote's deadline as a UTC time the agent can pass on.
+#[test]
+fn the_plan_counts_owner_approvals_and_gives_a_utc_deadline() {
+    assert_eq!(workflow::utc(0), "1970-01-01 00:00:00 UTC");
+    assert_eq!(workflow::utc(946_684_799_000), "1999-12-31 23:59:59 UTC");
+    assert_eq!(workflow::utc(951_868_799_999), "2000-02-29 23:59:59 UTC");
+    assert_eq!(workflow::utc(1_795_606_473_000), "2026-11-25 11:34:33 UTC");
+    assert_eq!(workflow::utc(4_107_542_400_000), "2100-03-01 00:00:00 UTC");
+    for (allowance, steps, approvals) in [
+        (U256::MAX, "pendle_execution", "1 owner approval"),
+        (
+            U256::ZERO,
+            "approve_input, pendle_execution",
+            "2 owner approvals, one per step",
+        ),
+        (
+            U256::from(1),
+            "reset_allowance, approve_input, pendle_execution",
+            "3 owner approvals, one per step",
+        ),
+    ] {
+        let mut h = Fake {
+            allowance,
+            ..Fake::default()
+        };
+        workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
+        let d = workflow::load(&mut h, ARB, &account(), BUY, "one").unwrap();
+        let plan = workflow::plan(&d);
+        let expires = workflow::utc(d.expires_ms);
+        assert_eq!(d.expires_ms, h.now + 300_000);
+        for line in [
+            format!("Quote expires at: {expires} ({} ms)", d.expires_ms),
+            format!(
+                "Steps: {steps}. Each is one Bloom outbox entry, so this operation needs {approvals}. Tell the owner how many to expect, and that the quote expires at {expires}, before the first."
+            ),
+            format!("So by {expires}, every step but the last must be approved and mined"),
+        ] {
+            assert!(plan.contains(&line), "{steps}: {line}\n{plan}");
+        }
+    }
 }
 #[test]
 fn sdk42_account_context_has_no_default() {
