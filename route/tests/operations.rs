@@ -1134,25 +1134,21 @@ fn an_unsupported_token_names_what_the_sy_takes() {
     }
 }
 /// `plan.md` names the steps, says how many owner approvals they need, and
-/// gives the quote's deadline as a UTC time the agent can pass on.
+/// gives the deadlines as UTC times the agent can pass on: with more than one
+/// step, every ceremony but the last is due a minute before the quote expires.
 #[test]
-fn the_plan_counts_owner_approvals_and_gives_a_utc_deadline() {
+fn the_plan_counts_owner_approvals_and_gives_utc_deadlines() {
     assert_eq!(workflow::utc(0), "1970-01-01 00:00:00 UTC");
     assert_eq!(workflow::utc(946_684_799_000), "1999-12-31 23:59:59 UTC");
     assert_eq!(workflow::utc(951_868_799_999), "2000-02-29 23:59:59 UTC");
     assert_eq!(workflow::utc(1_795_606_473_000), "2026-11-25 11:34:33 UTC");
     assert_eq!(workflow::utc(4_107_542_400_000), "2100-03-01 00:00:00 UTC");
-    for (allowance, steps, approvals) in [
-        (U256::MAX, "pendle_execution", "1 owner approval"),
-        (
-            U256::ZERO,
-            "approve_input, pendle_execution",
-            "2 owner approvals, one per step",
-        ),
+    for (allowance, steps) in [
+        (U256::MAX, "pendle_execution"),
+        (U256::ZERO, "approve_input, pendle_execution"),
         (
             U256::from(1),
             "reset_allowance, approve_input, pendle_execution",
-            "3 owner approvals, one per step",
         ),
     ] {
         let mut h = Fake {
@@ -1164,12 +1160,22 @@ fn the_plan_counts_owner_approvals_and_gives_a_utc_deadline() {
         let plan = workflow::plan(&d);
         let expires = workflow::utc(d.expires_ms);
         assert_eq!(d.expires_ms, h.now + 300_000);
+        let count = match d.steps.len() {
+            1 => format!(
+                "so this operation needs 1 owner approval. Ask for it, with the second write below, before {expires}; the owner may finish that ceremony later, while Bloom keeps it open."
+            ),
+            n => format!(
+                "so this operation needs {n} owner approvals, one per step. Tell the owner how many to expect, and to finish every ceremony but the last by {}, a minute before the quote expires at {expires}",
+                workflow::utc(d.expires_ms - 60_000)
+            ),
+        };
         for line in [
             format!("Quote expires at: {expires} ({} ms)", d.expires_ms),
-            format!(
-                "Steps: {steps}. Each is one Bloom outbox entry, so this operation needs {approvals}. Tell the owner how many to expect, and that the quote expires at {expires}, before the first."
-            ),
+            format!("Steps: {steps}. Each is one Bloom outbox entry, {count}"),
+            "If Bloom first asks for a wallet-policy update, that is one more approval".into(),
+            "ask for approvals only here: a ceremony opened through Bloom's outbox is invisible to this operation".into(),
             format!("So by {expires}, every step but the last must be approved and mined"),
+            "The deadline is status.json's expires_ms, not a step's approval.expires_ms".into(),
         ] {
             assert!(plan.contains(&line), "{steps}: {line}\n{plan}");
         }

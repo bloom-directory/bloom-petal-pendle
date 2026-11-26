@@ -54,11 +54,15 @@ market, which Pendle does not document.
 The quote's five minutes are one clock for the whole operation, set when the
 draft is written and never extended by a confirm. After expiry nothing new is
 staged, and only a step whose transaction approval Bloom has already asked
-for, or that Bloom may already have sent, continues. Each step takes three
-confirm writes (stage, ask for the owner approval, send), and the second is
-what lets a step outlive the quote. Keep `plan.md`, the `draft.json` read
-bodies (`workflow::APPROVALS_GUIDE` and `DEADLINE_GUIDE`) and the README's
-"Steps, owner approvals and the deadline" telling agents the same thing.
+for, or that Bloom may already have sent, continues. Each step usually takes
+three confirm writes (stage, ask for the owner approval, send), and the second
+is what lets a step outlive the quote, so only an approval asked for through
+the Petal counts: one opened through Bloom's outbox leaves the step to stop
+with the quote. Never tell an agent to send a Petal step through Bloom's
+outbox instead, since that skips the Petal's rechecks. Keep `plan.md`, the
+`draft.json` and `confirm.json` read bodies (`workflow::APPROVALS_GUIDE` and
+`DEADLINE_GUIDE`) and the README's "Steps, owner approvals and the deadline"
+telling agents the same thing.
 
 An accepted write, API quote or successful simulation is not execution proof.
 Unknown staging/submission outcomes require reconciliation. Never generate a

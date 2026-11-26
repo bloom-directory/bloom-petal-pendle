@@ -363,6 +363,13 @@ def main():
                 if challenge.returncode == 0:
                     value = json.loads(challenge.stdout)
                     if value.get("ceremony_url"):
+                        # The Petal asked for this approval, so it must have
+                        # recorded it as the entry's transaction approval:
+                        # only that kind lets a step be sent after the quote
+                        # expires.
+                        approval = step.get("approval") or {}
+                        assert approval.get("kind") == "transaction", step
+                        report["transaction_approvals"] = report.get("transaction_approvals", 0) + 1
                         complete(value["ceremony_url"])
             # A step still in flight refuses confirm, and may have mined
             # before the status read that follows.
