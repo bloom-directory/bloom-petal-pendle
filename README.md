@@ -162,11 +162,6 @@ about a ten-millionth for a matured redemption, so a ceiling under about 5
 bps refuses most trades, and 0 refuses any trade with a reported impact.
 PT maturity/redemption is expressed in the accounting asset, which can differ
 from the underlying asset. API APYs and expected amounts remain estimates.
-`impliedApy` is a hold-to-maturity rate: what a PT earns if it is held to
-expiry and redeemed. A buy followed by a sell trades against the market twice
-and pays its fee and spread each way, so a round trip opened and closed in one
-session loses a little by construction. On 25 November 2026 that was about
-0.06% before gas, on Base and on Ethereum.
 
 ## HTTP data sources
 
@@ -445,30 +440,15 @@ ceremony of a two-step buy was answered 223 seconds after the draft. Its
 approval went out with 77 seconds left, and the execution step was staged
 with 63.
 
-Before drafting:
-
-- Read the wallet policy at `/wallets/<wallet>/policy.json`.
-  `allowed_destinations` must list, for this chain, the router and the token
-  the trade spends; otherwise Bloom refuses the step. `allowed_petal_packages`
-  must list this package's hash, which `bloom petals ls` shows for
-  `petals/pendle/`. If it does not, or an update is pending under
-  `/wallets/<wallet>/policy-updates/pending/`, the first step's second write
-  asks for the policy update instead of its transaction approval. Count that
-  ceremony too, and have the owner finish it first: a step that has asked only
-  for the policy update stops with the quote.
-- If the owner cannot answer two or three prompts in time, the token can be
-  approved first, outside the Petal, so the draft needs only the execution
-  step. That approval is an `approve` from the selected account, on the token
-  being spent, to the router `0x888888888889758f76e7103c6cbf23abbf58f946`, for
-  exactly the amount the draft will spend. It must be mined before the draft
-  is written: an allowance still in flight is not counted, so the draft would
-  add its own steps. Until it mines, it holds the account's nonce. When an
-  allowance is already set, approve zero first: some tokens, such as USDT,
-  refuse to change one nonzero allowance to another. Do it only while no other
-  operation spends that token, since one approval replaces another and an
-  operation in flight would revert. Never approve more than the amount. If the
-  trade does not go ahead, the allowance stays, and a later draft for a larger
-  amount of that token needs three steps.
+Before drafting, read the wallet policy at `/wallets/<wallet>/policy.json`.
+`allowed_destinations` must list, for this chain, the router and the token the
+trade spends; otherwise Bloom refuses the step. `allowed_petal_packages` must
+list this package's hash, which `bloom petals ls` shows for `petals/pendle/`.
+If it does not, or an update is pending under
+`/wallets/<wallet>/policy-updates/pending/`, the first step's second write asks
+for the policy update instead of its transaction approval. Count that ceremony
+too, and have the owner finish it first: a step that has asked only for the
+policy update stops with the quote.
 
 If the quote expires first:
 

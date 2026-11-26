@@ -1356,12 +1356,6 @@ fn describe(market: &api::Market, token: &str, decimals: u8) -> String {
     format!("{token} ({symbol}, {decimals} decimals)")
 }
 
-/// What a draft's read body tells an agent about owner approvals, before the
-/// draft exists. `plan.md` gives the exact count once it does.
-pub const APPROVALS_GUIDE: &str = "one owner approval per outbox step: 1 when the router may already spend the amount, 2 when it may spend none (an exact approval first), 3 when it may spend some but too little (a reset to zero, then the exact approval); plus one wallet-policy approval first when the wallet policy does not yet list this package's hash. After this write, plan.md lists the steps and the deadlines: tell the owner how many approvals to expect, and by when, before the first";
-/// What a draft's read body tells an agent about the quote's five minutes.
-pub const DEADLINE_GUIDE: &str = "the quote expires five minutes after this write (status.json's expires_ms, not a step's approval.expires_ms, which is the ceremony's own). Each step usually takes three writes to this Petal's confirm.json: the first stages it, the second asks Bloom to send it and gets the owner approval it needs, the third sends it after the ceremony. Write the second straight after the first, and ask for approvals only here, never through Bloom's outbox: only an approval asked for here lets a step be sent after expiry, and nothing new is staged then. A step is staged only after the one before it has mined, so with more than one step every ceremony but the last must finish about a minute before expiry, more on Ethereum. Settle the wallet policy before drafting: a step that has asked only for a policy update stops with the quote";
-
 /// `ms` since the Unix epoch as a UTC date and time, to the second.
 pub fn utc(ms: u64) -> String {
     let secs = ms / 1000;

@@ -59,10 +59,10 @@ three confirm writes (stage, ask for the owner approval, send), and the second
 is what lets a step outlive the quote, so only an approval asked for through
 the Petal counts: one opened through Bloom's outbox leaves the step to stop
 with the quote. Never tell an agent to send a Petal step through Bloom's
-outbox instead, since that skips the Petal's rechecks. Keep `plan.md`, the
-`draft.json` and `confirm.json` read bodies (`workflow::APPROVALS_GUIDE` and
-`DEADLINE_GUIDE`) and the README's "Steps, owner approvals and the deadline"
-telling agents the same thing.
+outbox instead, since that skips the Petal's rechecks. `plan.md` carries these
+rules with the operation's own numbers; keep the README's "Steps, owner
+approvals and the deadline" and the `confirm.json` read bodies agreeing with
+it, and point to it rather than repeating it elsewhere.
 
 An accepted write, API quote or successful simulation is not execution proof.
 Unknown staging/submission outcomes require reconciliation. Never generate a
