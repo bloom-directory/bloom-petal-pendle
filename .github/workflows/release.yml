@@ -1,0 +1,25 @@
+name: Release Petal
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Keep the tooling ref equal to the Petal CLI in ci.yml, PETAL_REV in
+    # scripts/build.sh and the SDK pin in petal-build.toml.
+    uses: bloom-directory/petal/.github/workflows/release-petal.yml@7dd2722db5de305dd63ca4ed03591f3ab82fa40b
+    with:
+      petal-name: pendle
+      petal-tooling-ref: "7dd2722db5de305dd63ca4ed03591f3ab82fa40b"
+      build-command: scripts/build.sh
+      package-root: .
+      expected-route-count: 35
