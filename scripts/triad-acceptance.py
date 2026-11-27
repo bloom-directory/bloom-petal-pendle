@@ -17,7 +17,6 @@ import urllib.parse
 import urllib.request
 import urllib.error
 
-ROUTER = "0x888888888889758f76e7103c6cbf23abbf58f946"
 # An Arbitrum "USDai" market from Pendle's factory that Pendle has not curated.
 # It is not a market on any other chain, so every chain's curated list leaves it
 # out; on 24 November 2026 all 13 chains' lists returned nothing for it.
@@ -307,16 +306,15 @@ def main():
     passed("Signer-created account one differs from account zero")
     policy = json.loads(read(f"/wallets/{wallet}/policy.json"))
     policy["allowed_petal_packages"] = [report["package_hash"]]
-    # The token approval goes to the input token for a buy and to PT for a sell
-    # or a redemption.
-    destinations = {ROUTER} | ({TOKEN, PT} if MARKET else set()) | ({redeem["pt"]} if redeem else set())
-    policy["allowed_destinations"] = [{"chain": chain, "destination": d} for d in sorted(destinations)]
+    # One Petal-scoped entry covers the router calls and token approvals this
+    # Petal stages. Listing those contracts would let any staged call to them pass.
+    policy["allowed_destinations"] = [{"chain": chain, "destination": "petal:pendle"}]
     policy_file = work / (wallet + "-policy.json")
     policy_file.write_text(json.dumps(policy))
     launch = cli("wallet", "update-policy", wallet, "--file", str(policy_file)).stdout
     complete(launch_field(launch, "ceremony_url"))
     cli("wallet", "commit-policy", launch_field(launch, "operation_id"))
-    passed("package and exact destinations authorized by owner policy ceremony")
+    passed("package and petal:pendle destination authorized by owner policy ceremony")
     rpc("anvil_setBalance", [owner, hex(10**20)])
     if MARKET:
         # Fork-only test balance, written to the token's balance mapping. Assert
