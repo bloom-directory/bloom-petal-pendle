@@ -200,10 +200,16 @@ chain, factory, maturity and calldata checks before staging, and rebuilds
 each approval step from the intent: the token being spent, the router, and
 zero or the exact input.
 
-The wallet's policy must allow each transaction's target on that chain: the
-Pendle router, the input token for a buy's approval, and the PT for a sell's
-or redemption's approval. Destinations are per chain, so each chain needs its
-own entries.
+The wallet's policy must allow this Petal's transactions on each chain it
+trades on: add `{"chain": "<chain>", "destination": "petal:pendle"}` to
+`allowed_destinations`, with the chain's name from the Chains table. Bloom
+matches that entry only against transactions this Petal staged: its router
+calls and token approvals. Bloom does not propose the entry, since Pendle is
+not one of the Petals its setup installs: write the edited policy to
+`/wallets/<wallet>/policy.json` and the owner approves it in a ceremony. Do
+not list the router, the token or the PT instead. Bloom takes a contract
+call's target as its destination, so any staged call to a listed contract
+would pass, from another Petal or the agent's own raw transaction.
 
 The plan contains exact-amount token approval steps only when allowance is
 insufficient. A nonzero insufficient allowance is reset first. Each step
