@@ -52,17 +52,13 @@ factory check alone, or on the market endpoint's 404 for an uncurated
 market, which Pendle does not document.
 
 The quote's five minutes are one clock for the whole operation, set when the
-draft is written and never extended by a confirm. After expiry nothing new is
-staged, and only a step whose transaction approval Bloom has already asked
-for, or that Bloom may already have sent, continues. Each step usually takes
-three confirm writes (stage, ask for the owner approval, send), and the second
-is what lets a step outlive the quote, so only an approval asked for through
-the Petal counts: one opened through Bloom's outbox leaves the step to stop
-with the quote. Never tell an agent to send a Petal step through Bloom's
-outbox instead, since that skips the Petal's rechecks. `plan.md` carries these
-rules with the operation's own numbers; keep the README's "Steps, owner
-approvals and the deadline" and the `confirm.json` read bodies agreeing with
-it, and point to it rather than repeating it elsewhere.
+draft is written and never extended by a confirm. Only a transaction approval
+asked for through the Petal lets an unsent step outlive them. Never tell an
+agent to send a Petal step through Bloom's outbox instead, since that skips
+the Petal's rechecks. `plan.md` gives these rules with the operation's own
+numbers, and the README's "Steps, owner approvals and the deadline" is their
+only other copy: keep the two and the `confirm.json` read bodies agreeing, and
+link to that section rather than repeating it.
 
 An accepted write, API quote or successful simulation is not execution proof.
 Unknown staging/submission outcomes require reconciliation. Never generate a

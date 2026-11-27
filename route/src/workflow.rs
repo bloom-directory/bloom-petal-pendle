@@ -1381,19 +1381,33 @@ pub fn utc(ms: u64) -> String {
 pub fn plan(draft: &Draft) -> String {
     let expires = utc(draft.expires_ms);
     let steps: Vec<&str> = draft.steps.iter().map(|step| step.kind.as_str()).collect();
-    // Ceremonies before the last need time left for their step to be sent
-    // and mined, and the next one staged with its approval asked for.
+    // Each ceremony before the last needs time, for its own step and every
+    // later one but the last, to send and mine that step and to stage the
+    // next with its approval asked for. Ethereum's blocks take 12 seconds.
+    let (margin_ms, margin) = if draft.chain == Chain::Ethereum {
+        (120_000, "two minutes")
+    } else {
+        (60_000, "a minute")
+    };
+    let due = |ceremony: usize| {
+        let later = (steps.len() - ceremony) as u64;
+        utc(draft.expires_ms.saturating_sub(later * margin_ms))
+    };
+    let first = due(1);
     let deadline = match steps.len() {
         1 => format!(
-            "this operation needs 1 owner approval. Ask for it, with the second write below, before {expires}; the owner may finish that ceremony later, while Bloom keeps it open. Tell the owner to expect it"
+            "this operation needs 1 owner approval: tell the owner to expect it. Ask for it with the second write below before {expires}; the owner may then finish the ceremony later, while Bloom keeps it open."
         ),
         n => format!(
-            "this operation needs {n} owner approvals, one per step. Tell the owner how many to expect, and to finish every ceremony but the last by {}, a minute before the quote expires at {expires} (allow more on Ethereum, where blocks take 12 seconds)",
-            utc(draft.expires_ms.saturating_sub(60_000))
+            "this operation needs {n} owner approvals, one per step. Tell the owner how many to expect, and to finish {}; the last may finish later, while Bloom keeps it open. A step is staged only after the one before it has mined, and nothing new is staged after {expires}, so by then every step but the last must be approved and mined, and the last staged with its approval asked for. Each deadline leaves {margin} per later step to send and mine it and to stage the next.",
+            (1..n)
+                .map(|ceremony| format!("ceremony {ceremony} by {}", due(ceremony)))
+                .collect::<Vec<_>>()
+                .join(" and ")
         ),
     };
     format!(
-        "# Pendle {}\n\nWallet/account: {}/{}\nChain: {} ({})\nOwner/receiver: {}\nMarket: {}\nMaturity: {}\nInput token: {}\nInput base units: {}\nOutput token: {}\nExpected output base units (API estimate): {}\nMinimum output enforced in calldata: {}\nPrice impact (API estimate): {}\nQuote expires at: {expires} ({} ms)\nAccounting asset: {} ({})\nUnderlying asset: {} ({})\n\nThe input and output tokens are checked onchain, and their decimals are read from them. Symbols, the maturity date and the accounting and underlying assets are as Pendle reports them.\n\nSteps: {}. Each is one Bloom outbox entry, so {deadline}. If Bloom first asks for a wallet-policy update, that is one more approval, and a step that has asked only for it stops with the quote.\n\nEach step usually takes three writes of `confirm` to this operation's confirm.json: the first stages it, the second asks Bloom to send it and gets the owner approval it needs, and the third sends it after the ceremony. Write the second straight after the first, and ask for approvals only here: a ceremony opened through Bloom's outbox is invisible to this operation. Once Bloom has asked here for a step's approval, the step can still be sent after the quote expires, but nothing new is staged then. A step is staged only after the one before it has mined. So by {expires}, every step but the last must be approved and mined, and the last must be staged with its approval asked for. The deadline is status.json's expires_ms, not a step's approval.expires_ms, which is the ceremony's own and can be later. Inspect status.json between writes. A successful receipt is execution evidence, not an independent APY or redemption-value guarantee. Router: {}.\n",
+        "# Pendle {}\n\nWallet/account: {}/{}\nChain: {} ({})\nOwner/receiver: {}\nMarket: {}\nMaturity: {}\nInput token: {}\nInput base units: {}\nOutput token: {}\nExpected output base units (API estimate): {}\nMinimum output enforced in calldata: {}\nPrice impact (API estimate): {}\nQuote expires at: {expires} ({} ms)\nAccounting asset: {} ({})\nUnderlying asset: {} ({})\n\nThe input and output tokens are checked onchain, and their decimals are read from them. Symbols, the maturity date and the accounting and underlying assets are as Pendle reports them.\n\nSteps: {}. Each is one Bloom outbox entry, so {deadline}\n\nEach step takes three writes of `confirm` to this operation's confirm.json: the first stages it, the second asks Bloom to send it and gets the owner approval it needs, and the third sends it after the ceremony. Write the second straight after the first. Ask for approvals and send only here, never through Bloom's outbox: this operation records only the approvals asked for here, and the outbox skips its rechecks. If Bloom first asks for a wallet-policy update, that is one more approval. Have the owner approve it only if it adds this package's hash and nothing they did not intend, and otherwise cancel it. Then write `confirm` again before {first} to ask for the step's transaction approval: a step that has asked only for the policy update stops with the quote. The deadline is status.json's expires_ms, not a step's approval.expires_ms, which is the ceremony's own and can be later. Inspect status.json between writes. A successful receipt is execution evidence, not an independent APY or redemption-value guarantee. Router: {}.\n",
         draft.operation.name(),
         draft.wallet,
         draft.account,

@@ -433,17 +433,18 @@ impl Host for Fake {
             ));
             self.allowance.abi_encode()
         } else if bytes.starts_with(&getTokensInCall::SELECTOR) {
-            // The SY's own deposit tokens, as the market fixture lists them.
+            // The SY's own deposit tokens, as the market fixture lists them,
+            // the native token's zero address included.
             m.input_tokens
                 .iter()
-                .map(|t| address(&t.address))
-                .collect::<Result<Vec<_>>>()?
+                .map(|t| t.address.parse::<Address>().unwrap())
+                .collect::<Vec<_>>()
                 .abi_encode()
         } else if bytes.starts_with(&getTokensOutCall::SELECTOR) {
             m.output_tokens
                 .iter()
-                .map(|t| address(&t.address))
-                .collect::<Result<Vec<_>>>()?
+                .map(|t| t.address.parse::<Address>().unwrap())
+                .collect::<Vec<_>>()
                 .abi_encode()
         } else if bytes.starts_with(&decimalsCall::SELECTOR) {
             let to = address(p[0]["to"].as_str().unwrap())?;
@@ -1132,10 +1133,28 @@ fn an_unsupported_token_names_what_the_sy_takes() {
         assert!(h.requests.iter().all(|r| r.method != "POST"), "{op:?}");
         assert!(h.store.is_empty(), "{op:?}");
     }
+    // Hyperliquid's kHYPE SY also takes native HYPE, as the zero address,
+    // which a draft refuses, so the refusal does not offer it.
+    let zero = "0x0000000000000000000000000000000000000000";
+    let m = recorded_on(Chain::Hyperliquid).market;
+    assert!(m.input_tokens.iter().any(|t| t.address == zero));
+    let mut h = Fake {
+        market: m.clone(),
+        ..Fake::default()
+    };
+    let error =
+        verify_market(&mut h, Chain::Hyperliquid, &m, BUY, address(other).unwrap()).unwrap_err();
+    assert_eq!(
+        error,
+        format!(
+            "asset is not natively supported by this market's SY; aggregator routes are disabled. The SY accepts only itself ({}), 0xfd739d4e423301ce9385c1fb8850539d657c296d",
+            m.sy.address.to_lowercase()
+        )
+    );
 }
 /// `plan.md` names the steps, says how many owner approvals they need, and
-/// gives the deadlines as UTC times the agent can pass on: with more than one
-/// step, every ceremony but the last is due a minute before the quote expires.
+/// gives every ceremony but the last its own UTC deadline: a minute before the
+/// quote expires for each later step, or two minutes on Ethereum.
 #[test]
 fn the_plan_counts_owner_approvals_and_gives_utc_deadlines() {
     assert_eq!(workflow::utc(0), "1970-01-01 00:00:00 UTC");
@@ -1156,28 +1175,62 @@ fn the_plan_counts_owner_approvals_and_gives_utc_deadlines() {
             ..Fake::default()
         };
         workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
-        let d = workflow::load(&mut h, ARB, &account(), BUY, "one").unwrap();
-        let plan = workflow::plan(&d);
-        let expires = workflow::utc(d.expires_ms);
+        let mut d = workflow::load(&mut h, ARB, &account(), BUY, "one").unwrap();
         assert_eq!(d.expires_ms, h.now + 300_000);
-        let count = match d.steps.len() {
-            1 => format!(
-                "so this operation needs 1 owner approval. Ask for it, with the second write below, before {expires}; the owner may finish that ceremony later, while Bloom keeps it open."
+        let expires = workflow::utc(d.expires_ms);
+        let before = |ms: u64| workflow::utc(d.expires_ms - ms);
+        let (count, first) = match d.steps.len() {
+            1 => (
+                format!(
+                    "1 owner approval: tell the owner to expect it. Ask for it with the second write below before {expires}"
+                ),
+                expires.clone(),
             ),
-            n => format!(
-                "so this operation needs {n} owner approvals, one per step. Tell the owner how many to expect, and to finish every ceremony but the last by {}, a minute before the quote expires at {expires}",
-                workflow::utc(d.expires_ms - 60_000)
+            2 => (
+                format!(
+                    "2 owner approvals, one per step. Tell the owner how many to expect, and to finish ceremony 1 by {}; the last",
+                    before(60_000)
+                ),
+                before(60_000),
+            ),
+            _ => (
+                format!(
+                    "3 owner approvals, one per step. Tell the owner how many to expect, and to finish ceremony 1 by {} and ceremony 2 by {}; the last",
+                    before(120_000),
+                    before(60_000)
+                ),
+                before(120_000),
             ),
         };
+        let plan = workflow::plan(&d);
         for line in [
             format!("Quote expires at: {expires} ({} ms)", d.expires_ms),
-            format!("Steps: {steps}. Each is one Bloom outbox entry, {count}"),
-            "If Bloom first asks for a wallet-policy update, that is one more approval".into(),
-            "ask for approvals only here: a ceremony opened through Bloom's outbox is invisible to this operation".into(),
-            format!("So by {expires}, every step but the last must be approved and mined"),
+            format!("Steps: {steps}. Each is one Bloom outbox entry, so this operation needs {count}"),
+            "Ask for approvals and send only here, never through Bloom's outbox".into(),
+            "Have the owner approve it only if it adds this package's hash and nothing they did not intend, and otherwise cancel it".into(),
+            format!("Then write `confirm` again before {first} to ask for the step's transaction approval"),
             "The deadline is status.json's expires_ms, not a step's approval.expires_ms".into(),
         ] {
             assert!(plan.contains(&line), "{steps}: {line}\n{plan}");
+        }
+        // The rule for later steps says nothing about a single step.
+        let several = d.steps.len() > 1;
+        assert_eq!(plan.contains("every step but the last"), several, "{plan}");
+        assert_eq!(
+            plan.contains("Each deadline leaves a minute per later step"),
+            several,
+            "{plan}"
+        );
+        if d.steps.len() == 3 {
+            d.chain = ETH;
+            let plan = workflow::plan(&d);
+            let ethereum = format!(
+                "ceremony 1 by {} and ceremony 2 by {};",
+                workflow::utc(d.expires_ms - 240_000),
+                workflow::utc(d.expires_ms - 120_000)
+            );
+            assert!(plan.contains(&ethereum), "{plan}");
+            assert!(plan.contains("Each deadline leaves two minutes per later step"));
         }
     }
 }
