@@ -207,7 +207,23 @@ pub fn verify_market<H: Host>(
             call(host, chain, tokens.sy, getTokensOutCall {})?
         };
         if !supported.contains(&token) {
-            return Err("asset is not natively supported by this market's SY; aggregator routes are disabled".into());
+            // Name what the SY does take, so the caller can pick one: a sell
+            // or redemption cannot pay out anything else. The zero address is
+            // the native token, which `address` refuses, so it is not offered.
+            let verb = if operation == Operation::BuyPt {
+                "accepts"
+            } else {
+                "pays out"
+            };
+            let others: String = supported
+                .iter()
+                .filter(|t| !t.is_zero())
+                .map(|t| format!(", {t:#x}"))
+                .collect();
+            return Err(format!(
+                "asset is not natively supported by this market's SY; aggregator routes are disabled. The SY {verb} only these tokens: itself ({:#x}){others}",
+                tokens.sy
+            ));
         }
     }
     Ok(expired)

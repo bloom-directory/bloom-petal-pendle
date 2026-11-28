@@ -88,7 +88,7 @@ All paths below are relative to `/petals/pendle/`:
 | `<chain>/accounts/<wallet>/<index>/portfolio.json` | Pendle's indexed positions for the selected account address on this chain |
 | `<chain>/<operation>/<wallet>/<index>/<id>/draft.json` | Write a new immutable quote; read the input schema |
 | `<chain>/<operation>/<wallet>/<index>/<id>/plan.md` | Review inputs, receiver, minima, expiry and transaction steps |
-| `<chain>/<operation>/<wallet>/<index>/<id>/confirm.json` | Write exactly `confirm` to advance one outbox step |
+| `<chain>/<operation>/<wallet>/<index>/<id>/confirm.json` | Write exactly `confirm` to move the next outbox step on: stage it, ask for its owner approval, then send it |
 | `<chain>/<operation>/<wallet>/<index>/<id>/status.json` | Reconcile existing outbox entries; never submit on read |
 
 Operations are `buy-pt`, `sell-pt` and `redeem-pt`. Choose the chain and the
@@ -148,7 +148,16 @@ Draft body (all amounts are decimal strings in base units):
 
 `token` is the input asset for buys and output asset for sells/redemptions.
 SY is supported directly. Other ERC-20s must be native inputs/outputs of that
-market's SY wrapper. Slippage is 1–100 bps; price impact ceiling is 0–300 bps.
+market's SY wrapper: one of its `inputTokens` for a buy, one of its
+`outputTokens` for a sell or redemption. A draft checks them against the SY's
+own `getTokensIn()` or `getTokensOut()` onchain, and a refusal names the
+tokens the SY accepts or pays out, leaving out the native token's zero
+address, which the Petal refuses. A sell or redemption pays out nothing else,
+so an exit can land in a different asset from the one the PT was bought with.
+On Base, PT-yUTY's SY accepts USDC, UTY and yUTY but pays out only yUTY: a PT
+bought with USDC sells back into yUTY, and getting USDC again takes a separate
+swap.
+Slippage is 1–100 bps; price impact ceiling is 0–300 bps.
 The ceiling bounds the size of the impact Pendle reports, which is negative
 for an adverse move. Pendle reports a few bps even for small trades, and
 about a ten-millionth for a matured redemption, so a ceiling under about 5
@@ -204,10 +213,11 @@ not list the router, the token or the PT instead. Bloom takes a contract
 call's target as its destination, so any staged call to a listed contract
 would pass, from another Petal or the agent's own raw transaction.
 
-The plan contains exact-amount token approval steps only when allowance is
-insufficient. A nonzero insufficient allowance is reset first. Each write to
-`confirm.json` advances one step through Bloom's outbox. Complete the owner
-approval shown by Bloom, then retry the same path. Do not confirm the entry
+Read
+[Steps, owner approvals and the deadline](#steps-owner-approvals-and-the-deadline)
+before the first `confirm`: it gives the steps, their owner approvals and
+their deadlines. Complete the owner approval shown by Bloom, then retry the
+same path. Do not confirm the entry
 through its own `confirm` file in Bloom's outbox: that sends it without the
 Petal's curated-list, factory, maturity and allowance rechecks. Before 0.5.1,
 Bloom's agent guide and the `retry_path` in the entry's
@@ -235,8 +245,9 @@ a denial, or gave no reason the Petal can show. A refusal for a step Bloom
 may already have sent says so: check its hash on chain before creating a
 new intent.
 `status.json` is not cached: every read reconciles with the outbox and
-derives the operation's `state` from its steps. It is `prepared` or `staged`
-when the next `confirm` stages or sends a step, `approval_required` while an
+derives the operation's `state` from its steps. It is `prepared` when the
+next `confirm` stages a step, `staged` when it asks for that step's owner
+approval or sends it, `approval_required` while an
 owner approval is pending, `submitted` while a transaction is in flight and
 `expired` once the quote has expired and no step can continue.
 
@@ -358,32 +369,108 @@ entry the same way.
 symbols and the maturity date are Pendle's, printed without line breaks or
 markup.
 
-Quotes expire after five minutes. After that, `confirm` stages nothing new,
-and only a step whose transaction approval Bloom already requested, or that
-Bloom may already have sent, can continue, so a ceremony that outlasts the
-quote doesn't leave an approved entry stuck in the outbox. If that ceremony
-lapsed, Bloom may open a fresh one for the same entry. A step that has only
-asked for the wallet-policy approval stops with the quote, and status shows
-`expired`. Expiry does not cancel a submitted transaction or revoke an
-allowance. An expired operation's unsent entry holds its nonce, blocking the
-account's later transactions, and Bloom hands it to an identical new intent
-until Bloom expires it an hour after staging. When `confirm`'s refusal names
-it, discard it by writing `cancel` to
-`/wallets/<wallet>/<index>/chains/<chain>/outbox/pending/<id>/confirm`; when
-it does not, Bloom may have signed it, so the Petal names no discard. Later
-Bloom refuses to discard an entry that may have been signed. Reconcile
-previous steps before creating a fresh intent. Lost stage replies are
-`staging_unknown` and never restaged. When Bloom staged the entry but the
-Petal could not claim it, status shows the outbox id and the next `confirm`
-finishes the claim. A persisted writer lock after a crash requires operator
-inspection; locks are not silently expired. The Petal exposes no force-retry
-or force-unlock route.
+Lost stage replies are `staging_unknown` and never restaged. When Bloom
+staged the entry but the Petal could not claim it, status shows the outbox id
+and the next `confirm` finishes the claim. A persisted writer lock after a
+crash requires operator inspection; locks are not silently expired. The Petal
+exposes no force-retry or force-unlock route. What happens when the quote
+expires is in
+[Steps, owner approvals and the deadline](#steps-owner-approvals-and-the-deadline).
 
 `execution_confirmed` means every step has a successful normalized Bloom
 receipt. It does not independently prove a quoted APY or output balance.
 There is no Pendle-specific Broker clear-signing reader in this release:
 the normal owner review still presents contract-call bytes. The Petal plan
 does not replace an independent Broker reader.
+
+### Steps, owner approvals and the deadline
+
+A draft decides its steps from the router's mined allowance for the token
+being spent: the input token for a buy, the PT for a sell or redemption.
+
+| Router's allowance when the draft is written | Steps | Owner approvals |
+| --- | --- | --- |
+| covers the amount | `pendle_execution` | 1 |
+| zero | `approve_input`, `pendle_execution` | 2 |
+| nonzero but short | `reset_allowance`, `approve_input`, `pendle_execution` | 3 |
+
+Each step is one outbox entry and one owner ceremony. The first trade after
+an install that changes this package's hash also needs a wallet-policy
+ceremony (see below). `plan.md` lists the steps and gives each ceremony's
+deadline as a UTC time. Before the first ceremony, tell the owner how many
+prompts to expect and by when.
+
+Each step usually takes three writes of `confirm` to the Petal's
+`confirm.json`. The first stages the entry. The second asks Bloom to send it,
+and Bloom answers with the owner approval it needs, which status shows as the
+step's `approval`, of `kind` `transaction`. The third sends it after the
+ceremony. A ceremony that lapses needs the second write again. Write the
+second straight after the first: an approval asked for that way is what lets
+the step outlive the quote. Ask for approvals and send only through the
+Petal's `confirm.json`. The Petal records only the approvals asked for there:
+the owner can approve a ceremony opened through the entry's outbox `confirm`
+file or `bloom wallet confirm`, and the Petal still refuses the step once the
+quote expires.
+
+The quote expires five minutes after the draft is written, and those five
+minutes are one budget for the whole operation: confirming a step does not
+extend them. After expiry nothing new is staged, and only a step whose
+transaction approval Bloom has already asked for, or that Bloom may already
+have sent, continues. A step is staged only once the one before it has mined.
+So before the quote expires, every step but the last must be approved and
+mined, and the last must be staged with its approval asked for; only the last
+ceremony can finish later. Each earlier ceremony therefore has its own
+deadline: `plan.md` leaves a minute, or two on Ethereum, for each later step
+to be sent and mined and the next staged. With three steps, the first
+ceremony is due two minutes before expiry and the second one minute before
+(four and two on Ethereum). The quote's deadline is the operation's
+`expires_ms` in `status.json`. A step's `approval.expires_ms` is the
+ceremony's own: Bloom sets it up to ten minutes out and shows it on the
+ceremony page, so a ceremony finished in time for its page can still miss the
+quote.
+
+Before drafting, read the wallet policy at `/wallets/<wallet>/policy.json`.
+If `allowed_petal_packages` does not list this package's hash (`bloom petals
+ls` shows its first 12 characters for `petals/pendle/`), or an update is
+pending under `/wallets/<wallet>/policy-updates/pending/`, the first step's
+second write asks for the policy update instead of its transaction approval.
+Count that ceremony too. Bloom hands back any pending update, even an
+unrelated one such as the owner's own edit: have the owner approve it only if
+it adds this package's hash and nothing they did not intend, and otherwise
+cancel it, as [Transaction lifecycle](#transaction-lifecycle) describes. Then
+write `confirm` again straight away to ask for the step's transaction
+approval: the policy update extends no deadline above, and a step that has
+asked only for the policy update stops with the quote.
+
+If the quote expires first:
+
+- A step whose transaction approval Bloom has asked for can still go out:
+  complete its ceremony and write `confirm` to the Petal's `confirm.json`
+  again. If the ceremony lapsed, that write asks Bloom for a fresh one for the
+  same entry. When the step is an approval or a reset, the operation stops
+  after it, since the execution is never staged, and the allowance that step
+  set stays.
+- Otherwise `confirm` refuses with `quote expired`, and status shows
+  `expired`. Expiry does not cancel a submitted transaction or revoke an
+  allowance. Reconcile the earlier steps in `status.json` first, then:
+  - If the next step was never staged, nothing holds the account's nonce:
+    create a new intent. Its draft sees the allowance already set, so it
+    needs fewer steps.
+  - A staged step's unsent entry holds the account's nonce, blocking its
+    later transactions, and Bloom hands it to an identical new intent. When
+    the refusal names the file that discards it,
+    `/wallets/<wallet>/<index>/chains/<chain>/outbox/pending/<id>/confirm`,
+    write `cancel` there, then create a new intent.
+  - When the refusal names none, Bloom may be signing the entry, for example
+    after a ceremony opened outside the Petal, and refuses to discard it.
+    Keep reading `status.json`, and create a new intent only once the step
+    is `failed`: Bloom expired it unsent, by default an hour after staging,
+    and keeps an entry it may have signed until that is settled. If the step
+    becomes `submitted`, `broadcast_unknown` or `confirmed`, check its
+    transaction hash on chain first: the trade may already have gone out.
+  - Never send the step through Bloom's outbox instead. That skips the
+    Petal's curated-list, factory, maturity and allowance rechecks, and
+    Pendle may have dropped the market since the quote.
 
 ## Build and local integration
 

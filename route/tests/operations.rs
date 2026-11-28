@@ -433,17 +433,18 @@ impl Host for Fake {
             ));
             self.allowance.abi_encode()
         } else if bytes.starts_with(&getTokensInCall::SELECTOR) {
-            // The SY's own deposit tokens, as the market fixture lists them.
+            // The SY's own deposit tokens, as the market fixture lists them,
+            // the native token's zero address included.
             m.input_tokens
                 .iter()
-                .map(|t| address(&t.address))
-                .collect::<Result<Vec<_>>>()?
+                .map(|t| t.address.parse::<Address>().unwrap())
+                .collect::<Vec<_>>()
                 .abi_encode()
         } else if bytes.starts_with(&getTokensOutCall::SELECTOR) {
             m.output_tokens
                 .iter()
-                .map(|t| address(&t.address))
-                .collect::<Result<Vec<_>>>()?
+                .map(|t| t.address.parse::<Address>().unwrap())
+                .collect::<Vec<_>>()
                 .abi_encode()
         } else if bytes.starts_with(&decimalsCall::SELECTOR) {
             let to = address(p[0]["to"].as_str().unwrap())?;
@@ -1049,12 +1050,180 @@ fn native_token_drafts_are_refused() {
     assert_eq!(h.http_calls, 0);
     // The 0xEeee… placeholder for ETH is not one of the SY's tokens.
     r.token = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into();
-    assert_eq!(
-        draft(&mut h, &r).unwrap_err(),
-        "asset is not natively supported by this market's SY; aggregator routes are disabled"
+    assert!(
+        draft(&mut h, &r)
+            .unwrap_err()
+            .starts_with("asset is not natively supported by this market's SY; aggregator routes are disabled. The SY accepts only these tokens: itself")
     );
     assert_eq!(h.http_calls, 2, "no quote is requested");
     assert!(h.store.is_empty());
+}
+/// A token the market's SY does not take is refused before any quote, and the
+/// refusal names what the SY accepts for a buy, or pays out for an exit: an
+/// exit cannot land in anything else.
+#[test]
+fn an_unsupported_token_names_what_the_sy_takes() {
+    let other = "0x00000000000000000000000000000000000c0ffe";
+    let m = market();
+    let r = redeem_market();
+    let listed = |tokens: &[api::Token]| -> String {
+        tokens
+            .iter()
+            .map(|t| format!(", {}", t.address.to_lowercase()))
+            .collect()
+    };
+    for (chain, op, market, quote, verb, tokens) in [
+        (
+            ARB,
+            BUY,
+            m.clone(),
+            quote(),
+            "accepts",
+            listed(&m.input_tokens),
+        ),
+        (
+            ARB,
+            Operation::SellPt,
+            m.clone(),
+            sell_quote(),
+            "pays out",
+            listed(&m.output_tokens),
+        ),
+        (
+            ETH,
+            Operation::RedeemPt,
+            r.clone(),
+            redeem_quote(),
+            "pays out",
+            listed(&r.output_tokens),
+        ),
+    ] {
+        let mut h = Fake {
+            expired: op == Operation::RedeemPt,
+            market: market.clone(),
+            quote: quote.clone(),
+            ..Fake::default()
+        };
+        let request = DraftInput {
+            market: market.address.clone(),
+            token: other.into(),
+            amount: quote["inputs"][0]["amount"].as_str().unwrap().into(),
+            min_output: "1".into(),
+            slippage_bps: 10,
+            max_price_impact_bps: 100,
+        };
+        let error = workflow::create(
+            &mut h,
+            chain,
+            &account(),
+            op,
+            "one",
+            &serde_json::to_vec(&request).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "asset is not natively supported by this market's SY; aggregator routes are disabled. The SY {verb} only these tokens: itself ({}){tokens}",
+                market.sy.address.to_lowercase()
+            ),
+            "{op:?}"
+        );
+        assert!(!tokens.is_empty(), "{op:?}");
+        assert!(h.requests.iter().all(|r| r.method != "POST"), "{op:?}");
+        assert!(h.store.is_empty(), "{op:?}");
+    }
+    // Hyperliquid's kHYPE SY also takes native HYPE, as the zero address,
+    // which a draft refuses, so the refusal does not offer it.
+    let zero = "0x0000000000000000000000000000000000000000";
+    let m = recorded_on(Chain::Hyperliquid).market;
+    assert!(m.input_tokens.iter().any(|t| t.address == zero));
+    let mut h = Fake {
+        market: m.clone(),
+        ..Fake::default()
+    };
+    let error =
+        verify_market(&mut h, Chain::Hyperliquid, &m, BUY, address(other).unwrap()).unwrap_err();
+    assert_eq!(
+        error,
+        format!(
+            "asset is not natively supported by this market's SY; aggregator routes are disabled. The SY accepts only these tokens: itself ({}), 0xfd739d4e423301ce9385c1fb8850539d657c296d",
+            m.sy.address.to_lowercase()
+        )
+    );
+}
+/// `plan.md` names the steps, says how many owner approvals they need, and
+/// gives every ceremony but the last its own UTC deadline: a minute before the
+/// quote expires for each later step, or two minutes on Ethereum.
+#[test]
+fn the_plan_counts_owner_approvals_and_gives_utc_deadlines() {
+    assert_eq!(workflow::utc(0), "1970-01-01 00:00:00 UTC");
+    assert_eq!(workflow::utc(946_684_799_000), "1999-12-31 23:59:59 UTC");
+    assert_eq!(workflow::utc(951_868_799_999), "2000-02-29 23:59:59 UTC");
+    assert_eq!(workflow::utc(1_795_606_473_000), "2026-11-25 11:34:33 UTC");
+    assert_eq!(workflow::utc(4_107_542_400_000), "2100-03-01 00:00:00 UTC");
+    for (allowance, steps) in [
+        (U256::MAX, "pendle_execution"),
+        (U256::ZERO, "approve_input, pendle_execution"),
+        (
+            U256::from(1),
+            "reset_allowance, approve_input, pendle_execution",
+        ),
+    ] {
+        let mut h = Fake {
+            allowance,
+            ..Fake::default()
+        };
+        workflow::create(&mut h, ARB, &account(), BUY, "one", &body()).unwrap();
+        let mut d = workflow::load(&mut h, ARB, &account(), BUY, "one").unwrap();
+        assert_eq!(d.expires_ms, h.now + 300_000);
+        let expires = workflow::utc(d.expires_ms);
+        let before = |ms: u64| workflow::utc(d.expires_ms - ms);
+        let count = match d.steps.len() {
+            1 => format!(
+                "1 owner approval: tell the owner to expect it. Ask for it with the second write below before {expires}"
+            ),
+            2 => format!(
+                "2 owner approvals, one per step. Tell the owner how many to expect, and to finish ceremony 1 by {}; the last",
+                before(60_000)
+            ),
+            _ => format!(
+                "3 owner approvals, one per step. Tell the owner how many to expect, and to finish ceremony 1 by {} and ceremony 2 by {}; the last",
+                before(120_000),
+                before(60_000)
+            ),
+        };
+        let plan = workflow::plan(&d);
+        for line in [
+            format!("Quote expires at: {expires} ({} ms)", d.expires_ms),
+            format!("Steps: {steps}. Each is one Bloom outbox entry, so this operation needs {count}"),
+            "Ask for approvals and send only here, never through Bloom's outbox".into(),
+            "Have the owner approve it only if it adds this package's hash and nothing they did not intend, and otherwise cancel it".into(),
+            "Then write `confirm` again straight away to ask for the step's transaction approval: the policy update extends no deadline above".into(),
+            "The deadline is status.json's expires_ms, not a step's approval.expires_ms".into(),
+        ] {
+            assert!(plan.contains(&line), "{steps}: {line}\n{plan}");
+        }
+        // The rule for later steps says nothing about a single step.
+        let several = d.steps.len() > 1;
+        assert_eq!(plan.contains("every step but the last"), several, "{plan}");
+        assert_eq!(
+            plan.contains("Each deadline leaves a minute per later step"),
+            several,
+            "{plan}"
+        );
+        if d.steps.len() == 3 {
+            d.chain = ETH;
+            let plan = workflow::plan(&d);
+            let ethereum = format!(
+                "ceremony 1 by {} and ceremony 2 by {};",
+                workflow::utc(d.expires_ms - 240_000),
+                workflow::utc(d.expires_ms - 120_000)
+            );
+            assert!(plan.contains(&ethereum), "{plan}");
+            assert!(plan.contains("Each deadline leaves two minutes per later step"));
+        }
+    }
 }
 #[test]
 fn sdk42_account_context_has_no_default() {
