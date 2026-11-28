@@ -438,9 +438,9 @@ Count that ceremony too. Bloom hands back any pending update, even an
 unrelated one such as the owner's own edit: have the owner approve it only if
 it adds this package's hash and nothing they did not intend, and otherwise
 cancel it, as [Transaction lifecycle](#transaction-lifecycle) describes. Then
-write `confirm` again, before the first ceremony's deadline, to ask for the
-step's transaction approval: a step that has asked only for the policy update
-stops with the quote.
+write `confirm` again straight away to ask for the step's transaction
+approval: the policy update extends no deadline above, and a step that has
+asked only for the policy update stops with the quote.
 
 If the quote expires first:
 

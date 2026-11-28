@@ -1053,7 +1053,7 @@ fn native_token_drafts_are_refused() {
     assert!(
         draft(&mut h, &r)
             .unwrap_err()
-            .starts_with("asset is not natively supported by this market's SY; aggregator routes are disabled. The SY accepts only itself")
+            .starts_with("asset is not natively supported by this market's SY; aggregator routes are disabled. The SY accepts only these tokens: itself")
     );
     assert_eq!(h.http_calls, 2, "no quote is requested");
     assert!(h.store.is_empty());
@@ -1124,7 +1124,7 @@ fn an_unsupported_token_names_what_the_sy_takes() {
         assert_eq!(
             error,
             format!(
-                "asset is not natively supported by this market's SY; aggregator routes are disabled. The SY {verb} only itself ({}){tokens}",
+                "asset is not natively supported by this market's SY; aggregator routes are disabled. The SY {verb} only these tokens: itself ({}){tokens}",
                 market.sy.address.to_lowercase()
             ),
             "{op:?}"
@@ -1147,7 +1147,7 @@ fn an_unsupported_token_names_what_the_sy_takes() {
     assert_eq!(
         error,
         format!(
-            "asset is not natively supported by this market's SY; aggregator routes are disabled. The SY accepts only itself ({}), 0xfd739d4e423301ce9385c1fb8850539d657c296d",
+            "asset is not natively supported by this market's SY; aggregator routes are disabled. The SY accepts only these tokens: itself ({}), 0xfd739d4e423301ce9385c1fb8850539d657c296d",
             m.sy.address.to_lowercase()
         )
     );
@@ -1179,27 +1179,18 @@ fn the_plan_counts_owner_approvals_and_gives_utc_deadlines() {
         assert_eq!(d.expires_ms, h.now + 300_000);
         let expires = workflow::utc(d.expires_ms);
         let before = |ms: u64| workflow::utc(d.expires_ms - ms);
-        let (count, first) = match d.steps.len() {
-            1 => (
-                format!(
-                    "1 owner approval: tell the owner to expect it. Ask for it with the second write below before {expires}"
-                ),
-                expires.clone(),
+        let count = match d.steps.len() {
+            1 => format!(
+                "1 owner approval: tell the owner to expect it. Ask for it with the second write below before {expires}"
             ),
-            2 => (
-                format!(
-                    "2 owner approvals, one per step. Tell the owner how many to expect, and to finish ceremony 1 by {}; the last",
-                    before(60_000)
-                ),
-                before(60_000),
+            2 => format!(
+                "2 owner approvals, one per step. Tell the owner how many to expect, and to finish ceremony 1 by {}; the last",
+                before(60_000)
             ),
-            _ => (
-                format!(
-                    "3 owner approvals, one per step. Tell the owner how many to expect, and to finish ceremony 1 by {} and ceremony 2 by {}; the last",
-                    before(120_000),
-                    before(60_000)
-                ),
+            _ => format!(
+                "3 owner approvals, one per step. Tell the owner how many to expect, and to finish ceremony 1 by {} and ceremony 2 by {}; the last",
                 before(120_000),
+                before(60_000)
             ),
         };
         let plan = workflow::plan(&d);
@@ -1208,7 +1199,7 @@ fn the_plan_counts_owner_approvals_and_gives_utc_deadlines() {
             format!("Steps: {steps}. Each is one Bloom outbox entry, so this operation needs {count}"),
             "Ask for approvals and send only here, never through Bloom's outbox".into(),
             "Have the owner approve it only if it adds this package's hash and nothing they did not intend, and otherwise cancel it".into(),
-            format!("Then write `confirm` again before {first} to ask for the step's transaction approval"),
+            "Then write `confirm` again straight away to ask for the step's transaction approval: the policy update extends no deadline above".into(),
             "The deadline is status.json's expires_ms, not a step's approval.expires_ms".into(),
         ] {
             assert!(plan.contains(&line), "{steps}: {line}\n{plan}");

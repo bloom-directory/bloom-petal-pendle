@@ -221,7 +221,7 @@ pub fn verify_market<H: Host>(
                 .map(|t| format!(", {t:#x}"))
                 .collect();
             return Err(format!(
-                "asset is not natively supported by this market's SY; aggregator routes are disabled. The SY {verb} only itself ({:#x}){others}",
+                "asset is not natively supported by this market's SY; aggregator routes are disabled. The SY {verb} only these tokens: itself ({:#x}){others}",
                 tokens.sy
             ));
         }
